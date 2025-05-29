@@ -1,0 +1,11 @@
+[package]
+name = "raffine"
+version = "0.1.0"
+edition = "2024"
+authors = ["zwishingbjf@gmail.com"]
+description = "A crate for affine transformations like Python's Affine package."
+license = "MIT"
+keywords = ["geometry", "affine", "transformation"]
+
+[dependencies]
+thiserror = "2.0.0"
