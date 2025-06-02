@@ -2,11 +2,10 @@
 name = "raffine"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["zwishingbjfu@gmail.com"]
 description = "A 2D affine transformation library for Rust"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourusername/raffine"
-documentation = "https://docs.rs/raffine"
+license = "MIT"
+repository = "https://gitee.com/zhangwishing/raffine"
 keywords = ["affine", "transformation",]
 readme = "README.md"
 
