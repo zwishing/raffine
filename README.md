@@ -1,6 +1,6 @@
 # Raffine
 
-A high-performance, affine transformation library for Rust, inspired by Python's Affine package.
+A high-performance, affine transformation library for Rust, inspired by Python's Affine package(https://github.com/rasterio/affine).
 
 ## 📦 Installation
 
@@ -72,7 +72,7 @@ assert!(t1.almost_equals(&t2, Some(1e-10)));
 
 ## 📄 License
 
-MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+MIT license ([LICENSE](LICENSE) or http://opensource.org/licenses/MIT)
 
 ## 🙏 Credits
 
