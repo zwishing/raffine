@@ -1,11 +1,14 @@
 [package]
 name = "raffine"
 version = "0.1.0"
-edition = "2024"
-authors = ["zwishingbjf@gmail.com"]
-description = "A crate for affine transformations like Python's Affine package."
-license = "MIT"
-keywords = ["geometry", "affine", "transformation"]
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "A 2D affine transformation library for Rust"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/raffine"
+documentation = "https://docs.rs/raffine"
+keywords = ["affine", "transformation",]
+readme = "README.md"
 
 [dependencies]
-thiserror = "2.0.0"
+thiserror = "2.0.12"

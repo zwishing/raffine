@@ -72,14 +72,6 @@ pub enum AffineError {
     UndefinedRotation,
 }
 
-/// Pre-computed cosine and sine values for common angles
-const COS_SIN_LOOKUP: [(f64, f64); 4] = [
-    (1.0, 0.0),   // 0 degrees
-    (0.0, 1.0),   // 90 degrees
-    (-1.0, 0.0),  // 180 degrees
-    (0.0, -1.0),  // 270 degrees
-];
-
 /// Return the cosine and sine for the given angle in degrees.
 ///
 /// With special-case handling of multiples of 90 for perfect right angles.
@@ -88,20 +80,18 @@ fn cos_sin_deg(deg: f64) -> (f64, f64) {
     let deg_mod = deg % 360.0;
     let deg_norm = if deg_mod < 0.0 { deg_mod + 360.0 } else { deg_mod };
     
-    // Check for common angles using lookup table
-    if (deg_norm - 0.0).abs() < f64::EPSILON || (deg_norm - 360.0).abs() < f64::EPSILON {
-        return COS_SIN_LOOKUP[0];
-    } else if (deg_norm - 90.0).abs() < f64::EPSILON {
-        return COS_SIN_LOOKUP[1];
-    } else if (deg_norm - 180.0).abs() < f64::EPSILON {
-        return COS_SIN_LOOKUP[2];
-    } else if (deg_norm - 270.0).abs() < f64::EPSILON {
-        return COS_SIN_LOOKUP[3];
+    // Check for common angles using match expression
+    match deg_norm {
+        d if (d - 0.0).abs() < f64::EPSILON || (d - 360.0).abs() < f64::EPSILON => (1.0, 0.0),
+        d if (d - 90.0).abs() < f64::EPSILON => (0.0, 1.0),
+        d if (d - 180.0).abs() < f64::EPSILON => (-1.0, 0.0),
+        d if (d - 270.0).abs() < f64::EPSILON => (0.0, -1.0),
+        // For other angles, compute values
+        _ => {
+            let rad = deg_norm.to_radians();
+            (rad.cos(), rad.sin())
+        }
     }
-    
-    // For other angles, compute values
-    let rad = deg_norm.to_radians();
-    (rad.cos(), rad.sin())
 }
 
 /// Two dimensional affine transform for 2D linear mapping.
@@ -468,14 +458,8 @@ impl Affine {
     pub fn to_tuple(&self) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64) {
         (self.a, self.b, self.c, self.d, self.e, self.f, 0.0, 0.0, 1.0)
     }
-}
 
-/// Implement matrix multiplication for Affine transform.
-impl Mul for Affine {
-    type Output = Self;
-
-    #[inline]
-    fn mul(self, other: Self) -> Self {
+    pub fn _mul(&self, other: &Affine) -> Affine {
         let sa = self.a;
         let sb = self.b;
         let sc = self.c;
@@ -490,7 +474,7 @@ impl Mul for Affine {
         let oe = other.e;
         let of = other.f;
         
-        Self {
+        Affine {
             a: sa * oa + sb * od,
             b: sa * ob + sb * oe,
             c: sa * oc + sb * of + sc,
@@ -499,6 +483,16 @@ impl Mul for Affine {
             f: sd * oc + se * of + sf,
             determinant: None,
         }
+    }
+}
+
+/// Implement matrix multiplication for Affine transform.
+impl Mul for Affine {
+    type Output = Self;
+
+    #[inline]
+    fn mul(self, other: Self) -> Self {
+        self._mul(&other)
     }
 }
 
@@ -508,29 +502,7 @@ impl Mul<Affine> for &Affine {
 
     #[inline]
     fn mul(self, other: Affine) -> Affine {
-        let sa = self.a;
-        let sb = self.b;
-        let sc = self.c;
-        let sd = self.d;
-        let se = self.e;
-        let sf = self.f;
-        
-        let oa = other.a;
-        let ob = other.b;
-        let oc = other.c;
-        let od = other.d;
-        let oe = other.e;
-        let of = other.f;
-        
-        Affine {
-            a: sa * oa + sb * od,
-            b: sa * ob + sb * oe,
-            c: sa * oc + sb * of + sc,
-            d: sd * oa + se * od,
-            e: sd * ob + se * oe,
-            f: sd * oc + se * of + sf,
-            determinant: None,
-        }
+        self._mul(&other)
     }
 }
 
@@ -539,29 +511,7 @@ impl Mul<&Affine> for Affine {
 
     #[inline]
     fn mul(self, other: &Affine) -> Affine {
-        let sa = self.a;
-        let sb = self.b;
-        let sc = self.c;
-        let sd = self.d;
-        let se = self.e;
-        let sf = self.f;
-        
-        let oa = other.a;
-        let ob = other.b;
-        let oc = other.c;
-        let od = other.d;
-        let oe = other.e;
-        let of = other.f;
-        
-        Affine {
-            a: sa * oa + sb * od,
-            b: sa * ob + sb * oe,
-            c: sa * oc + sb * of + sc,
-            d: sd * oa + se * od,
-            e: sd * ob + se * oe,
-            f: sd * oc + se * of + sf,
-            determinant: None,
-        }
+        self._mul(other)
     }
 }
 
@@ -570,29 +520,7 @@ impl Mul<&Affine> for &Affine {
 
     #[inline]
     fn mul(self, other: &Affine) -> Affine {
-        let sa = self.a;
-        let sb = self.b;
-        let sc = self.c;
-        let sd = self.d;
-        let se = self.e;
-        let sf = self.f;
-        
-        let oa = other.a;
-        let ob = other.b;
-        let oc = other.c;
-        let od = other.d;
-        let oe = other.e;
-        let of = other.f;
-        
-        Affine {
-            a: sa * oa + sb * od,
-            b: sa * ob + sb * oe,
-            c: sa * oc + sb * of + sc,
-            d: sd * oa + se * od,
-            e: sd * ob + se * oe,
-            f: sd * oc + se * of + sf,
-            determinant: None,
-        }
+        self._mul(other)
     }
 }
 
