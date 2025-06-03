@@ -76,4 +76,4 @@ MIT license ([LICENSE](LICENSE) or http://opensource.org/licenses/MIT)
 
 ## 🙏 Credits
 
-This library is derived from Casey Duncan's Planar package and inspired by Python's Affine package. Special thanks to the Python geospatial community for the excellent API design.
+This library is derived from Casey Duncan's Planar package and inspired by Python's Affine package. 
