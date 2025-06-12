@@ -574,7 +574,7 @@ impl Not for Affine {
             d: rd,
             e: re,
             f: -sc * rd - sf * re,
-            determinant: Some(1.0 / idet),
+            determinant: Some(idet),
         })
     }
 }
@@ -745,6 +745,14 @@ mod tests {
         let p = (5.0, 5.0);
         assert_eq!(c1 * p, c2 * p);
         assert_eq!(c1 * p, (20.0, 35.0));
+    }
+
+    #[test]
+    fn test_inversion_determinant() {
+        let s = Affine::scale(2.0, Some(3.0));
+        let inv = (!s).unwrap();
+        let expected = 1.0 / s.determinant();
+        assert!((inv.determinant() - expected).abs() < get_epsilon());
     }
 }
 
