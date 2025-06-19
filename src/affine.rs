@@ -544,6 +544,28 @@ impl Mul<(f64, f64)> for &Affine {
     }
 }
 
+/// Implement matrix multiplication for Affine transform and integer point.
+impl Mul<(isize, isize)> for Affine {
+    type Output = (isize, isize);
+
+    #[inline]
+    fn mul(self, point: (isize, isize)) -> (isize, isize) {
+        let (x, y) = self.transform_vector((point.0 as f64, point.1 as f64));
+        (x.round() as isize, y.round() as isize)
+    }
+}
+
+/// Implement matrix multiplication for reference to Affine and integer point.
+impl Mul<(isize, isize)> for &Affine {
+    type Output = (isize, isize);
+
+    #[inline]
+    fn mul(self, point: (isize, isize)) -> (isize, isize) {
+        let (x, y) = self.transform_vector((point.0 as f64, point.1 as f64));
+        (x.round() as isize, y.round() as isize)
+    }
+}
+
 /// Implement inversion (~) operator for Affine transform.
 impl Not for Affine {
     type Output = Result<Self, AffineError>;
@@ -698,6 +720,14 @@ mod tests {
         let p = (5.0, 5.0);
         let result = t * p;
         assert_eq!(result, (15.0, 25.0));
+    }
+
+    #[test]
+    fn test_translation_isize() {
+        let t = Affine::translation(10.0, 20.0);
+        let p = (5isize, 5isize);
+        let result = t * p;
+        assert_eq!(result, (15isize, 25isize));
     }
 
     #[test]

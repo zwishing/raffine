@@ -27,6 +27,11 @@ fn main() {
     let result = translation * point;
     println!("Translated point: {:?}", result); // (11.0, 21.0)
 
+    // 变换整数点
+    let ipoint = (1isize, 1isize);
+    let iresult = translation * ipoint;
+    println!("Translated point: {:?}", iresult); // (11, 21)
+
     // 组合变换（从右到左应用）
     let composite = translation * rotation * scale;
     let transformed = composite * point;
