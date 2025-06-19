@@ -50,10 +50,7 @@ fn main() {
 ```rust
 // 从 GDAL GeoTransform 格式导入
 let gdal_params = [100.0, 1.0, 0.0, 200.0, 0.0, -1.0];
-let transform = Affine::from_gdal(
-    gdal_params[0], gdal_params[1], gdal_params[2],
-    gdal_params[3], gdal_params[4], gdal_params[5]
-);
+let transform = Affine::from_gdal(&gdal_params);
 
 // 导出为 GDAL 格式
 let (c, a, b, f, d, e) = transform.to_gdal();
