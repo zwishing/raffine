@@ -27,6 +27,11 @@ fn main() {
     let result = translation * point;
     println!("Translated point: {:?}", result); // (11.0, 21.0)
 
+    // Transform an integer point
+    let ipoint = (1isize, 1isize);
+    let iresult = translation * ipoint;
+    println!("Translated point: {:?}", iresult); // (11, 21)
+
     // Compose transformations (applied right to left)
     let composite = translation * rotation * scale;
     let transformed = composite * point;
