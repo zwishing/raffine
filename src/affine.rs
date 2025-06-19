@@ -131,7 +131,8 @@ impl Affine {
 
     /// Create a transformation from GDAL's GetGeoTransform() coefficient order.
     #[inline]
-    pub fn from_gdal(c: f64, a: f64, b: f64, f: f64, d: f64, e: f64) -> Self {
+    pub fn from_gdal(coeffs: &[f64; 6]) -> Self {
+        let [c, a, b, f, d, e] = *coeffs;
         Self::new(a, b, c, d, e, f)
     }
 
@@ -783,6 +784,13 @@ mod tests {
         let inv = (!s).unwrap();
         let expected = 1.0 / s.determinant();
         assert!((inv.determinant() - expected).abs() < get_epsilon());
+    }
+
+    #[test]
+    fn test_from_to_gdal() {
+        let params = [100.0, 1.0, 0.0, 200.0, 0.0, -1.0];
+        let affine = Affine::from_gdal(&params);
+        assert_eq!(affine.to_gdal(), (100.0, 1.0, 0.0, 200.0, 0.0, -1.0));
     }
 }
 
