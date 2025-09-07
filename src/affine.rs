@@ -37,6 +37,7 @@ use std::fmt;
 use std::ops::{Mul, Not};
 use std::fmt::Display;
 use std::sync::atomic::{AtomicU64, Ordering};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 // Using constants instead of static mut for better safety and performance
@@ -103,7 +104,7 @@ fn cos_sin_deg(deg: f64) -> (f64, f64) {
 ///
 /// The transform can perform any combination of translations, scales/flips,
 /// shears, and rotations. Parallel lines are preserved by these transforms.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct Affine {
     a: f64,
     b: f64,
