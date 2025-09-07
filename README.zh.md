@@ -1,81 +1,81 @@
 # Raffine
 
-A high-performance, affine transformation library for Rust, inspired by Python's Affine package(https://github.com/rasterio/affine).
+一个高性能的 Rust 仿射变换库，灵感来自 Python 的 [Affine](https://github.com/rasterio/affine) 包。
 
-## 📦 Installation
+## 📦 安装
 
-Add this to your `Cargo.toml`:
+在 `Cargo.toml` 中添加：
 
 ```toml
 [dependencies]
 raffine = "0.1"
 ```
 
-## 🎯 Quick Start
+## 🎯 快速开始
 
 ```rust
 use raffine::Affine;
 
 fn main() {
-    // Create basic transformations
+    // 创建基本变换
     let translation = Affine::translation(10.0, 20.0);
     let rotation = Affine::rotation(45.0, None);
     let scale = Affine::scale(2.0, Some(3.0));
 
-    // Transform a point
+    // 变换一个点
     let point = (1.0, 1.0);
     let result = translation * point;
     println!("Translated point: {:?}", result); // (11.0, 21.0)
 
-    // Transform an integer point
+    // 变换整数点
     let ipoint = (1isize, 1isize);
     let iresult = translation * ipoint;
     println!("Translated point: {:?}", iresult); // (11, 21)
 
-    // Compose transformations (applied right to left)
+    // 组合变换（从右到左应用）
     let composite = translation * rotation * scale;
     let transformed = composite * point;
-  
-    // Invert transformations
+
+    // 反转变换
     let inverse = (!translation).unwrap();
     let original = inverse * result;
     assert_eq!(original, point);
 }
 ```
 
-## 🌍 GIS Integration
+## 🌍 GIS 集成
 
-### GDAL Compatibility
+### 与 GDAL 兼容
 
 ```rust
-// Import from GDAL GeoTransform format
+// 从 GDAL GeoTransform 格式导入
 let gdal_params = [100.0, 1.0, 0.0, 200.0, 0.0, -1.0];
 let transform = Affine::from_gdal(&gdal_params);
 
-// Export to GDAL format
+// 导出为 GDAL 格式
 let (c, a, b, f, d, e) = transform.to_gdal();
 ```
 
-## ⚙️ Configuration
+## ⚙️ 配置
 
-### Precision Control
+### 精度控制
 
 ```rust
 use raffine::{set_epsilon, get_epsilon};
 
-// Set global precision for floating-point comparisons
+// 设置全局浮点比较精度
 set_epsilon(1e-10);
 
-// Custom precision for specific comparisons
+// 针对特定比较自定义精度
 let t1 = Affine::identity();
 let t2 = Affine::translation(1e-11, 0.0);
 assert!(t1.almost_equals(&t2, Some(1e-10)));
 ```
 
-## 📄 License
+## 📄 许可证
 
-MIT license ([LICENSE](LICENSE) or http://opensource.org/licenses/MIT)
+MIT license ([LICENSE](LICENSE) 或 http://opensource.org/licenses/MIT)
 
-## 🙏 Credits
+## 🙏 鸣谢
 
-This library is derived from Casey Duncan's Planar package and inspired by Python's Affine package. 
+本库源自 Casey Duncan 的 Planar 包，并受到 Python Affine 包的启发。

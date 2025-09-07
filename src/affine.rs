@@ -131,7 +131,8 @@ impl Affine {
 
     /// Create a transformation from GDAL's GetGeoTransform() coefficient order.
     #[inline]
-    pub fn from_gdal(c: f64, a: f64, b: f64, f: f64, d: f64, e: f64) -> Self {
+    pub fn from_gdal(coeffs: &[f64; 6]) -> Self {
+        let [c, a, b, f, d, e] = *coeffs;
         Self::new(a, b, c, d, e, f)
     }
 
@@ -563,6 +564,28 @@ impl Mul<(f64, f64)> for &Affine {
     }
 }
 
+/// Implement matrix multiplication for Affine transform and integer point.
+impl Mul<(isize, isize)> for Affine {
+    type Output = (isize, isize);
+
+    #[inline]
+    fn mul(self, point: (isize, isize)) -> (isize, isize) {
+        let (x, y) = self.transform_vector((point.0 as f64, point.1 as f64));
+        (x.round() as isize, y.round() as isize)
+    }
+}
+
+/// Implement matrix multiplication for reference to Affine and integer point.
+impl Mul<(isize, isize)> for &Affine {
+    type Output = (isize, isize);
+
+    #[inline]
+    fn mul(self, point: (isize, isize)) -> (isize, isize) {
+        let (x, y) = self.transform_vector((point.0 as f64, point.1 as f64));
+        (x.round() as isize, y.round() as isize)
+    }
+}
+
 /// Implement inversion (~) operator for Affine transform.
 impl Not for Affine {
     type Output = Result<Self, AffineError>;
@@ -593,7 +616,7 @@ impl Not for Affine {
             d: rd,
             e: re,
             f: -sc * rd - sf * re,
-            determinant: Some(1.0 / idet),
+            determinant: Some(idet),
         })
     }
 }
@@ -720,6 +743,14 @@ mod tests {
     }
 
     #[test]
+    fn test_translation_isize() {
+        let t = Affine::translation(10.0, 20.0);
+        let p = (5isize, 5isize);
+        let result = t * p;
+        assert_eq!(result, (15isize, 25isize));
+    }
+
+    #[test]
     fn test_scale() {
         let s = Affine::scale(2.0, Some(3.0));
         let p = (5.0, 5.0);
@@ -764,6 +795,21 @@ mod tests {
         let p = (5.0, 5.0);
         assert_eq!(c1 * p, c2 * p);
         assert_eq!(c1 * p, (20.0, 35.0));
+    }
+
+    #[test]
+    fn test_inversion_determinant() {
+        let s = Affine::scale(2.0, Some(3.0));
+        let inv = (!s).unwrap();
+        let expected = 1.0 / s.determinant();
+        assert!((inv.determinant() - expected).abs() < get_epsilon());
+    }
+
+    #[test]
+    fn test_from_to_gdal() {
+        let params = [100.0, 1.0, 0.0, 200.0, 0.0, -1.0];
+        let affine = Affine::from_gdal(&params);
+        assert_eq!(affine.to_gdal(), (100.0, 1.0, 0.0, 200.0, 0.0, -1.0));
     }
 }
 
