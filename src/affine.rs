@@ -94,7 +94,7 @@ fn cos_sin_deg(deg: f64) -> (f64, f64) {
     }
 }
 
-/// Two dimensional affine transform for 2D linear mapping.
+/// Two-dimensional affine transform for 2D linear mapping.
 ///
 /// Internally the transform is stored as a 3x3 transformation matrix.
 /// The transform may be constructed directly by specifying the first
@@ -458,7 +458,26 @@ impl Affine {
     pub fn to_tuple(&self) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64) {
         (self.a, self.b, self.c, self.d, self.e, self.f, 0.0, 0.0, 1.0)
     }
+    //
+    #[inline]
+    pub fn rowcol(&self,xs:&Vec<f64>,ys:&Vec<f64>,zs:&Vec<f64>)->(Vec<f64>,Vec<f64>) {
+        assert_eq!(xs.len(), ys.len());
+        let mut out_x = Vec::with_capacity(xs.len());
+        let mut out_y = Vec::with_capacity(xs.len());
+        let t = &self.to_array();
+        for i in 0..xs.len() {
+            let x = xs[i];
+            let y = ys[i];
+            let new_x = t[0][0] * x + t[0][1] * y + t[0][2] * 1.0;
+            let new_y = t[1][0] * x + t[1][1] * y + t[1][2] * 1.0;
+            out_x.push(new_x);
+            out_y.push(new_y);
+        }
+        (out_x, out_y)
+    }
 
+    /// Mul
+    #[inline]
     pub fn _mul(&self, other: &Affine) -> Affine {
         let sa = self.a;
         let sb = self.b;

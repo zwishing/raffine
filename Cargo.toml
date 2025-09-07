@@ -6,8 +6,34 @@ authors = ["zwishingbjfu@gmail.com"]
 description = "A 2D affine transformation library for Rust"
 license = "MIT"
 repository = "https://gitee.com/zhangwishing/raffine"
-keywords = ["affine", "transformation",]
+keywords = ["affine", "transformation", "matrix", "2d", "geometry"]
+categories = ["graphics", "mathematics", "science"]
 readme = "README.md"
 
 [dependencies]
 thiserror = "2.0.12"
+
+[dev-dependencies]
+approx = "0.5"
+
+[features]
+default = []
+parallel = ["dep:rayon"]
+serde = ["dep:serde"]
+
+[dependencies.rayon]
+version = "1.7"
+optional = true
+
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+optional = true
+
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
+
+[[example]]
+name = "image_transformation"
+path = "examples/image_transformation.rs"
