@@ -11,6 +11,7 @@ categories = ["graphics", "mathematics", "science"]
 readme = "README.md"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 thiserror = "2.0.12"
 
 [dev-dependencies]
@@ -19,15 +20,9 @@ approx = "0.5"
 [features]
 default = []
 parallel = ["dep:rayon"]
-serde = ["dep:serde"]
 
 [dependencies.rayon]
 version = "1.7"
-optional = true
-
-[dependencies.serde]
-version = "1.0"
-features = ["derive"]
 optional = true
 
 [[example]]
