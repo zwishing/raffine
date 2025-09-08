@@ -462,20 +462,19 @@ impl Affine {
     }
     //
     #[inline]
-    pub fn rowcol(&self,xs:&Vec<f64>,ys:&Vec<f64>,zs:&Vec<f64>)->(Vec<f64>,Vec<f64>) {
+    pub fn rowcol(&self, xs: &[f64], ys: &[f64], _zs: &[f64]) -> (Vec<f64>, Vec<f64>) {
         assert_eq!(xs.len(), ys.len());
-        let mut out_x = Vec::with_capacity(xs.len());
-        let mut out_y = Vec::with_capacity(xs.len());
-        let t = &self.to_array();
-        for i in 0..xs.len() {
-            let x = xs[i];
-            let y = ys[i];
-            let new_x = t[0][0] * x + t[0][1] * y + t[0][2] * 1.0;
-            let new_y = t[1][0] * x + t[1][1] * y + t[1][2] * 1.0;
-            out_x.push(new_x);
-            out_y.push(new_y);
-        }
-        (out_x, out_y)
+        
+        let inv = (!*self).expect("Transform must be invertible");
+        let (rows, cols): (Vec<f64>, Vec<f64>) = xs.iter().zip(ys.iter())
+            .map(|(&x, &y)| {
+                let row = inv.d * x + inv.e * y + inv.f;
+                let col = inv.a * x + inv.b * y + inv.c;
+                (row, col)
+            })
+            .unzip();
+        
+        (rows, cols)
     }
 
     /// Mul
@@ -811,6 +810,54 @@ mod tests {
         let params = [100.0, 1.0, 0.0, 200.0, 0.0, -1.0];
         let affine = Affine::from_gdal(&params);
         assert_eq!(affine.to_gdal(), (100.0, 1.0, 0.0, 200.0, 0.0, -1.0));
+    }
+
+    #[test]
+    fn test_rowcol(){
+        let aff = Affine::new(
+            300.0379266750948,
+            0.0,
+            101985.0,
+            0.0,
+             -300.0417827298049929,
+            2826915.0
+        );
+        let left = 101985.0000000000000000;
+        let bottom = 2611485.0000000000000000;
+        let right = 339315.0000000000000000;
+        let top = 2826915.0000000000000000;
+        
+        // Calculate image dimensions based on the coordinate system
+        // Width = (right - left) / pixel_width
+        // Height = (top - bottom) / abs(pixel_height)
+        let pixel_width: f64 = 300.0379266750948;
+        let pixel_height: f64 = -300.0417827298049929;
+        let width = ((right - left) / pixel_width).round() as i32;
+        let height = ((top - bottom) / pixel_height.abs()).round() as i32;
+        
+        // Test all four corners - rowcol now returns (rows, cols) format
+        // Top-left corner should map to (0, 0) - (row=0, col=0)
+        let (row_result, col_result) = aff.rowcol(&vec![left], &vec![top], &vec![1.0]);
+        assert!((row_result[0] - 0.0).abs() < 1e-10, "Top-left row: expected 0, got {}", row_result[0]);
+        assert!((col_result[0] - 0.0).abs() < 1e-10, "Top-left col: expected 0, got {}", col_result[0]);
+        
+        // Top-right corner should map to (0, width) - (row=0, col=width)  
+        let (row_result, col_result) = aff.rowcol(&vec![right], &vec![top], &vec![1.0]);
+        assert!((row_result[0] - 0.0).abs() < 1e-10, "Top-right row: expected 0, got {}", row_result[0]);
+        assert!((col_result[0] - width as f64).abs() < 1e-10, "Top-right col: expected {}, got {}", width, col_result[0]);
+        
+        // Bottom-right corner should map to (height, width) - (row=height, col=width)
+        let (row_result, col_result) = aff.rowcol(&vec![right], &vec![bottom], &vec![1.0]);
+        assert!((row_result[0] - height as f64).abs() < 1e-10, "Bottom-right row: expected {}, got {}", height, row_result[0]);
+        assert!((col_result[0] - width as f64).abs() < 1e-10, "Bottom-right col: expected {}, got {}", width, col_result[0]);
+        
+        // Bottom-left corner should map to (height, 0) - (row=height, col=0)
+        let (row_result, col_result) = aff.rowcol(&vec![left], &vec![bottom], &vec![1.0]);
+        assert!((row_result[0] - height as f64).abs() < 1e-10, "Bottom-left row: expected {}, got {}", height, row_result[0]);
+        assert!((col_result[0] - 0.0).abs() < 1e-10, "Bottom-left col: expected 0, got {}", col_result[0]);
+        
+        // Test the specific coordinate mentioned - should also map to (0, 0)
+        assert_eq!(aff.rowcol(&vec![101985.0], &vec![2826915.0], &vec![1.0]), (vec![0.0], vec![0.0]));
     }
 }
 
