@@ -71,6 +71,15 @@ pub enum AffineError {
     /// The rotation angle could not be computed for this transform
     #[error("The rotation angle could not be computed for this transform")]
     UndefinedRotation,
+    /// The input array length mismatch
+    #[error("array length mismatch: xs has {xs_len}, ys has {ys_len}")]
+    LengthMismatch { xs_len: usize, ys_len: usize },
+    /// Invalid world file format
+    #[error("invalid world file format: {message}")]
+    InvalidWorldFile { message: String },
+    /// Parse error when reading world file
+    #[error("failed to parse world file: {source}")]
+    ParseError { source: std::num::ParseFloatError },
 }
 
 /// Return the cosine and sine for the given angle in degrees.
@@ -127,7 +136,7 @@ impl Affine {
     /// | 1  |   | 0  0  1 | | 1 |
     #[inline]
     pub fn new(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Self {
-        Self { a, b, c, d, e, f, determinant: None }
+        Self { a, b, c, d, e, f, determinant: Some(a*e - b*d) }
     }
 
     /// Create a transformation from GDAL's GetGeoTransform() coefficient order.
@@ -460,21 +469,50 @@ impl Affine {
     pub fn to_tuple(&self) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64) {
         (self.a, self.b, self.c, self.d, self.e, self.f, 0.0, 0.0, 1.0)
     }
-    //
+
+    // Inverse the transform
     #[inline]
-    pub fn rowcol(&self, xs: &[f64], ys: &[f64], _zs: &[f64]) -> (Vec<f64>, Vec<f64>) {
-        assert_eq!(xs.len(), ys.len());
+    pub fn inverse(&self) -> Result<Self, AffineError> {
+        Ok((!*self)?)
+    }
+
+    /// Convert to row and column indices
+    ///
+    /// Transforms world coordinates (x, y) to pixel coordinates (row, col).
+    /// Returns `(rows, cols)` where each element corresponds to the transformed coordinates.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AffineError::LengthMismatch` if `xs` and `ys` have different lengths.
+    /// Returns `AffineError::TransformNotInvertible` if the transform cannot be inverted.
+    #[inline]
+    pub fn rowcol(&self, xs: &[f64], ys: &[f64], _zs: &[f64]) -> Result<(Vec<f64>, Vec<f64>), AffineError> {
+        // Early return for length mismatch
+        if xs.len() != ys.len() {
+            return Err(AffineError::LengthMismatch { 
+                xs_len: xs.len(), 
+                ys_len: ys.len() 
+            });
+        }
         
-        let inv = (!*self).expect("Transform must be invertible");
-        let (rows, cols): (Vec<f64>, Vec<f64>) = xs.iter().zip(ys.iter())
-            .map(|(&x, &y)| {
-                let row = inv.d * x + inv.e * y + inv.f;
-                let col = inv.a * x + inv.b * y + inv.c;
-                (row, col)
-            })
-            .unzip();
+        // Early return for empty input
+        if xs.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
         
-        (rows, cols)
+        let inv = self.inverse()?;
+        
+        // Pre-allocate with known capacity for better performance
+        let mut rows = Vec::with_capacity(xs.len());
+        let mut cols = Vec::with_capacity(xs.len());
+        
+        // Use iterators for better performance and readability
+        for (&x, &y) in xs.iter().zip(ys.iter()) {
+            rows.push(inv.d * x + inv.e * y + inv.f);
+            cols.push(inv.a * x + inv.b * y + inv.c);
+        }
+        
+        Ok((rows, cols))
     }
 
     /// Mul
@@ -668,13 +706,20 @@ pub const IDENTITY: Affine = Affine {
 ///
 /// This method also translates the coefficients from center- to
 /// corner-based coordinates.
-pub fn loadsw(s: &str) -> Result<Affine, Box<dyn std::error::Error>> {
+///
+/// # Errors
+///
+/// Returns `AffineError::ParseError` if the string contains invalid numbers.
+/// Returns `AffineError::InvalidWorldFile` if the string doesn't contain exactly 6 coefficients.
+pub fn loadsw(s: &str) -> Result<Affine, AffineError> {
     let coeffs: Vec<f64> = s.split_whitespace()
-        .map(|x| x.parse::<f64>())
+        .map(|x| x.parse::<f64>().map_err(|e| AffineError::ParseError { source: e }))
         .collect::<Result<Vec<f64>, _>>()?;
     
     if coeffs.len() != 6 {
-        return Err(format!("Expected 6 coefficients, found {}", coeffs.len()).into());
+        return Err(AffineError::InvalidWorldFile {
+            message: format!("Expected 6 coefficients, found {}", coeffs.len())
+        });
     }
     
     let a = coeffs[0];
@@ -837,27 +882,28 @@ mod tests {
         
         // Test all four corners - rowcol now returns (rows, cols) format
         // Top-left corner should map to (0, 0) - (row=0, col=0)
-        let (row_result, col_result) = aff.rowcol(&vec![left], &vec![top], &vec![1.0]);
+        let (row_result, col_result) = aff.rowcol(&vec![left], &vec![top], &vec![1.0]).unwrap();
         assert!((row_result[0] - 0.0).abs() < 1e-10, "Top-left row: expected 0, got {}", row_result[0]);
         assert!((col_result[0] - 0.0).abs() < 1e-10, "Top-left col: expected 0, got {}", col_result[0]);
         
         // Top-right corner should map to (0, width) - (row=0, col=width)  
-        let (row_result, col_result) = aff.rowcol(&vec![right], &vec![top], &vec![1.0]);
+        let (row_result, col_result) = aff.rowcol(&vec![right], &vec![top], &vec![1.0]).unwrap();
         assert!((row_result[0] - 0.0).abs() < 1e-10, "Top-right row: expected 0, got {}", row_result[0]);
         assert!((col_result[0] - width as f64).abs() < 1e-10, "Top-right col: expected {}, got {}", width, col_result[0]);
         
         // Bottom-right corner should map to (height, width) - (row=height, col=width)
-        let (row_result, col_result) = aff.rowcol(&vec![right], &vec![bottom], &vec![1.0]);
+        let (row_result, col_result) = aff.rowcol(&vec![right], &vec![bottom], &vec![1.0]).unwrap();
         assert!((row_result[0] - height as f64).abs() < 1e-10, "Bottom-right row: expected {}, got {}", height, row_result[0]);
         assert!((col_result[0] - width as f64).abs() < 1e-10, "Bottom-right col: expected {}, got {}", width, col_result[0]);
         
         // Bottom-left corner should map to (height, 0) - (row=height, col=0)
-        let (row_result, col_result) = aff.rowcol(&vec![left], &vec![bottom], &vec![1.0]);
+        let (row_result, col_result) = aff.rowcol(&vec![left], &vec![bottom], &vec![1.0]).unwrap();
         assert!((row_result[0] - height as f64).abs() < 1e-10, "Bottom-left row: expected {}, got {}", height, row_result[0]);
         assert!((col_result[0] - 0.0).abs() < 1e-10, "Bottom-left col: expected 0, got {}", col_result[0]);
         
         // Test the specific coordinate mentioned - should also map to (0, 0)
-        assert_eq!(aff.rowcol(&vec![101985.0], &vec![2826915.0], &vec![1.0]), (vec![0.0], vec![0.0]));
+        let result = aff.rowcol(&vec![101985.0], &vec![2826915.0], &vec![1.0]).unwrap();
+        assert_eq!(result, (vec![0.0], vec![0.0]));
     }
 }
 
