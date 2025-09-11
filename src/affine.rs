@@ -115,14 +115,14 @@ fn cos_sin_deg(deg: f64) -> (f64, f64) {
 /// shears, and rotations. Parallel lines are preserved by these transforms.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct Affine {
-    a: f64,
-    b: f64,
-    c: f64,
-    d: f64,
-    e: f64,
-    f: f64,
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    pub e: f64,
+    pub f: f64,
     // Cached values
-    determinant: Option<f64>,
+    pub determinant: Option<f64>,
 }
 
 impl Affine {
