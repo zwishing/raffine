@@ -341,22 +341,49 @@ impl Affine {
     }
 
     /// Transform a single 2D point/vector.
+    ///
+    /// Uses [`f64::mul_add`] for fused multiply-add when available
+    /// (FMA3 on x86_64, the FMUL/FMADD fused path on AArch64).
     #[inline]
     pub fn transform_vector(&self, vector: (f64, f64)) -> (f64, f64) {
         let (x, y) = vector;
         (
-            x * self.a + y * self.b + self.c,
-            x * self.d + y * self.e + self.f,
+            x.mul_add(self.a, y.mul_add(self.b, self.c)),
+            x.mul_add(self.d, y.mul_add(self.e, self.f)),
         )
     }
 
     /// Transform a sequence of points in-place. No-op for the identity.
+    #[inline]
     pub fn itransform(&self, seq: &mut [(f64, f64)]) {
         if !self.is_identity() {
             for point in seq.iter_mut() {
                 *point = self.transform_vector(*point);
             }
         }
+    }
+
+    /// Transform `src` into `dst`, which must have the same length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AffineError::LengthMismatch`] if `src` and `dst` differ
+    /// in length.
+    pub fn transform_into(
+        &self,
+        src: &[(f64, f64)],
+        dst: &mut [(f64, f64)],
+    ) -> Result<(), AffineError> {
+        if src.len() != dst.len() {
+            return Err(AffineError::LengthMismatch {
+                xs_len: src.len(),
+                ys_len: dst.len(),
+            });
+        }
+        for (s, d) in src.iter().zip(dst.iter_mut()) {
+            *d = self.transform_vector(*s);
+        }
+        Ok(())
     }
 
     /// Convert to a 3x3 array.
@@ -404,6 +431,26 @@ impl Affine {
         xs: &[f64],
         ys: &[f64],
     ) -> Result<(Vec<f64>, Vec<f64>), AffineError> {
+        let mut rows = Vec::with_capacity(xs.len());
+        let mut cols = Vec::with_capacity(xs.len());
+        self.rowcol_into(xs, ys, &mut rows, &mut cols)?;
+        Ok((rows, cols))
+    }
+
+    /// Like [`rowcol`](Self::rowcol), but appends into caller-provided
+    /// buffers to avoid allocations on repeated calls. Pre-`clear()` the
+    /// buffers if you want fresh results.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`rowcol`](Self::rowcol).
+    pub fn rowcol_into(
+        &self,
+        xs: &[f64],
+        ys: &[f64],
+        rows: &mut Vec<f64>,
+        cols: &mut Vec<f64>,
+    ) -> Result<(), AffineError> {
         if xs.len() != ys.len() {
             return Err(AffineError::LengthMismatch {
                 xs_len: xs.len(),
@@ -411,28 +458,27 @@ impl Affine {
             });
         }
         if xs.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(());
         }
-
         let inv = self.inverse()?;
-        let mut rows = Vec::with_capacity(xs.len());
-        let mut cols = Vec::with_capacity(xs.len());
+        rows.reserve(xs.len());
+        cols.reserve(xs.len());
         for (&x, &y) in xs.iter().zip(ys.iter()) {
-            rows.push(inv.d * x + inv.e * y + inv.f);
-            cols.push(inv.a * x + inv.b * y + inv.c);
+            rows.push(x.mul_add(inv.d, y.mul_add(inv.e, inv.f)));
+            cols.push(x.mul_add(inv.a, y.mul_add(inv.b, inv.c)));
         }
-        Ok((rows, cols))
+        Ok(())
     }
 
     #[inline]
     fn mul_affine(&self, other: &Affine) -> Affine {
         Affine::new(
-            self.a * other.a + self.b * other.d,
-            self.a * other.b + self.b * other.e,
-            self.a * other.c + self.b * other.f + self.c,
-            self.d * other.a + self.e * other.d,
-            self.d * other.b + self.e * other.e,
-            self.d * other.c + self.e * other.f + self.f,
+            self.a.mul_add(other.a, self.b * other.d),
+            self.a.mul_add(other.b, self.b * other.e),
+            self.a.mul_add(other.c, self.b.mul_add(other.f, self.c)),
+            self.d.mul_add(other.a, self.e * other.d),
+            self.d.mul_add(other.b, self.e * other.e),
+            self.d.mul_add(other.c, self.e.mul_add(other.f, self.f)),
         )
     }
 }
@@ -526,8 +572,8 @@ impl Not for Affine {
         let rd = -self.d * idet;
         let re = self.a * idet;
         Ok(Self::new(
-            ra, rb, -self.c * ra - self.f * rb,
-            rd, re, -self.c * rd - self.f * re,
+            ra, rb, (-self.c).mul_add(ra, -self.f * rb),
+            rd, re, (-self.c).mul_add(rd, -self.f * re),
         ))
     }
 }
@@ -926,8 +972,9 @@ mod tests {
         assert!((row_result[0] - height as f64).abs() < TOL);
         assert!(col_result[0].abs() < TOL);
 
-        let result = aff.rowcol(&[101985.0], &[2826915.0]).unwrap();
-        assert_eq!(result, (vec![0.0], vec![0.0]));
+        let (rs, cs) = aff.rowcol(&[101985.0], &[2826915.0]).unwrap();
+        assert!(rs[0].abs() < TOL);
+        assert!(cs[0].abs() < TOL);
     }
 
     #[test]
@@ -944,6 +991,45 @@ mod tests {
         let aff = Affine::identity();
         let (rows, cols) = aff.rowcol(&[], &[]).unwrap();
         assert!(rows.is_empty() && cols.is_empty());
+    }
+
+    #[test]
+    fn test_transform_into() {
+        let t = Affine::translation(1.0, 2.0);
+        let src = vec![(0.0, 0.0), (3.0, 4.0)];
+        let mut dst = vec![(0.0, 0.0); 2];
+        t.transform_into(&src, &mut dst).unwrap();
+        assert_eq!(dst, vec![(1.0, 2.0), (4.0, 6.0)]);
+
+        let mut bad = vec![(0.0, 0.0); 1];
+        assert!(matches!(
+            t.transform_into(&src, &mut bad),
+            Err(AffineError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_rowcol_into_buffer_reuse() {
+        let aff = Affine::translation(10.0, 20.0);
+        let mut rows = Vec::with_capacity(4);
+        let mut cols = Vec::with_capacity(4);
+
+        rows.clear();
+        cols.clear();
+        aff.rowcol_into(&[11.0, 12.0], &[21.0, 22.0], &mut rows, &mut cols).unwrap();
+        assert_eq!(rows, vec![1.0, 2.0]);
+        assert_eq!(cols, vec![1.0, 2.0]);
+
+        // Reuse without reallocation (capacity preserved)
+        let cap_rows = rows.capacity();
+        let cap_cols = cols.capacity();
+        rows.clear();
+        cols.clear();
+        aff.rowcol_into(&[13.0], &[23.0], &mut rows, &mut cols).unwrap();
+        assert_eq!(rows, vec![3.0]);
+        assert_eq!(cols, vec![3.0]);
+        assert!(rows.capacity() >= cap_rows);
+        assert!(cols.capacity() >= cap_cols);
     }
 
     #[test]
