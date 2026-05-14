@@ -8,7 +8,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-raffine = "0.1"
+raffine = "0.2"
 ```
 
 ## 🎯 Quick Start

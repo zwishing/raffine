@@ -8,7 +8,7 @@
 
 ```toml
 [dependencies]
-raffine = "0.1"
+raffine = "0.2"
 ```
 
 ## 🎯 快速开始
