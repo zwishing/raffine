@@ -2,13 +2,16 @@
 name = "raffine"
 version = "0.2.0"
 edition = "2021"
-authors = ["zwishingbjfu@gmail.com"]
-description = "A 2D affine transformation library for Rust"
+authors = ["zwishing <zwishingbjfu@gmail.com>"]
+description = "A 2D affine transformation library for Rust, inspired by Python's affine package."
 license = "MIT"
-repository = "https://gitee.com/zhangwishing/raffine"
-keywords = ["affine", "transformation", "matrix", "2d", "geometry"]
-categories = ["graphics", "mathematics", "science"]
+repository = "https://github.com/zwishing/raffine"
+homepage = "https://github.com/zwishing/raffine"
+documentation = "https://docs.rs/raffine"
+keywords = ["affine", "transformation", "matrix", "geometry", "gis"]
+categories = ["graphics", "mathematics", "science::geo"]
 readme = "README.md"
+rust-version = "1.70"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
