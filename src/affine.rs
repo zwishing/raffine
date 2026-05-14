@@ -34,85 +34,90 @@
  */
 
 use std::fmt;
-use std::ops::{Mul, Not};
 use std::fmt::Display;
+use std::ops::{Mul, Not};
 use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-// Using constants instead of static mut for better safety and performance
-/// Default epsilon value for floating-point comparisons
+/// Default epsilon value for floating-point comparisons.
 pub const DEFAULT_EPSILON: f64 = 1e-5;
-/// Default square of epsilon
+/// Default square of epsilon.
 pub const DEFAULT_EPSILON2: f64 = DEFAULT_EPSILON * DEFAULT_EPSILON;
 
-// Thread-safe global epsilon values
 static EPSILON_BITS: AtomicU64 = AtomicU64::new(DEFAULT_EPSILON.to_bits());
 static EPSILON2_BITS: AtomicU64 = AtomicU64::new(DEFAULT_EPSILON2.to_bits());
 
-/// Get the current epsilon value
+/// Get the current epsilon value.
 #[inline]
 pub fn get_epsilon() -> f64 {
     f64::from_bits(EPSILON_BITS.load(Ordering::Relaxed))
 }
 
-/// Get the current epsilon squared value
+/// Get the current epsilon-squared value.
 #[inline]
 pub fn get_epsilon2() -> f64 {
     f64::from_bits(EPSILON2_BITS.load(Ordering::Relaxed))
 }
 
-/// Error type for affine transformation operations
+/// Error type for affine transformation operations.
 #[derive(Debug, Error)]
 pub enum AffineError {
-    /// The transform could not be inverted
+    /// The transform could not be inverted.
     #[error("The transform could not be inverted")]
     TransformNotInvertible,
-    /// The rotation angle could not be computed for this transform
+    /// The rotation angle could not be computed for this transform.
     #[error("The rotation angle could not be computed for this transform")]
     UndefinedRotation,
-    /// The input array length mismatch
+    /// The input array length mismatch.
     #[error("array length mismatch: xs has {xs_len}, ys has {ys_len}")]
     LengthMismatch { xs_len: usize, ys_len: usize },
-    /// Invalid world file format
+    /// Invalid world file format.
     #[error("invalid world file format: {message}")]
     InvalidWorldFile { message: String },
-    /// Parse error when reading world file
-    #[error("failed to parse world file: {source}")]
-    ParseError { source: std::num::ParseFloatError },
+    /// Parse error when reading world file.
+    #[error("failed to parse world file at token {index}: {source}")]
+    ParseError {
+        index: usize,
+        source: std::num::ParseFloatError,
+    },
 }
 
-/// Return the cosine and sine for the given angle in degrees.
-///
-/// With special-case handling of multiples of 90 for perfect right angles.
+/// Return the cosine and sine for the given angle in degrees, with
+/// exact handling of multiples of 90.
 #[inline]
 fn cos_sin_deg(deg: f64) -> (f64, f64) {
     let deg_mod = deg % 360.0;
     let deg_norm = if deg_mod < 0.0 { deg_mod + 360.0 } else { deg_mod };
-    
-    // Check for common angles using match expression
-    match deg_norm {
-        d if (d - 0.0).abs() < f64::EPSILON || (d - 360.0).abs() < f64::EPSILON => (1.0, 0.0),
-        d if (d - 90.0).abs() < f64::EPSILON => (0.0, 1.0),
-        d if (d - 180.0).abs() < f64::EPSILON => (-1.0, 0.0),
-        d if (d - 270.0).abs() < f64::EPSILON => (0.0, -1.0),
-        // For other angles, compute values
-        _ => {
-            let rad = deg_norm.to_radians();
-            (rad.cos(), rad.sin())
-        }
+    if deg_norm == 0.0 {
+        (1.0, 0.0)
+    } else if deg_norm == 90.0 {
+        (0.0, 1.0)
+    } else if deg_norm == 180.0 {
+        (-1.0, 0.0)
+    } else if deg_norm == 270.0 {
+        (0.0, -1.0)
+    } else {
+        let rad = deg_norm.to_radians();
+        (rad.cos(), rad.sin())
     }
 }
 
 /// Two-dimensional affine transform for 2D linear mapping.
 ///
-/// Internally the transform is stored as a 3x3 transformation matrix.
-/// The transform may be constructed directly by specifying the first
-/// two rows of matrix values as 6 floats. Since the matrix is an affine
-/// transform, the last row is always (0, 0, 1).
+/// Internally the transform is stored as the first two rows of a 3x3
+/// transformation matrix. The transform may be constructed directly by
+/// specifying these 6 floats. The last row is always (0, 0, 1).
 ///
 /// The transform can perform any combination of translations, scales/flips,
-/// shears, and rotations. Parallel lines are preserved by these transforms.
+/// shears, and rotations. Parallel lines are preserved.
+///
+/// ```text
+/// | x' |   | a  b  c | | x |
+/// | y' | = | d  e  f | | y |
+/// | 1  |   | 0  0  1 | | 1 |
+/// ```
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct Affine {
     pub a: f64,
@@ -121,187 +126,118 @@ pub struct Affine {
     pub d: f64,
     pub e: f64,
     pub f: f64,
-    // Cached values
-    pub determinant: Option<f64>,
 }
 
 impl Affine {
-    /// Create a new affine transformation.
-    ///
-    /// The parameters correspond to the coefficients of the 3x3 augmented
-    /// affine transformation matrix:
-    ///
-    /// | x' |   | a  b  c | | x |
-    /// | y' | = | d  e  f | | y |
-    /// | 1  |   | 0  0  1 | | 1 |
+    /// Create a new affine transformation from the six coefficients of the
+    /// first two rows of the augmented 3x3 matrix.
     #[inline]
-    pub fn new(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Self {
-        Self { a, b, c, d, e, f, determinant: Some(a*e - b*d) }
+    pub const fn new(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Self {
+        Self { a, b, c, d, e, f }
     }
 
     /// Create a transformation from GDAL's GetGeoTransform() coefficient order.
     #[inline]
-    pub fn from_gdal(coeffs: &[f64; 6]) -> Self {
-        let [c, a, b, f, d, e] = *coeffs;
-        Self::new(a, b, c, d, e, f)
+    pub const fn from_gdal(coeffs: &[f64; 6]) -> Self {
+        Self::new(coeffs[1], coeffs[2], coeffs[0], coeffs[4], coeffs[5], coeffs[3])
+    }
+
+    /// Create a transformation from the upper two rows of a 3x3 array.
+    /// The third row is assumed to be (0, 0, 1) and is ignored.
+    #[inline]
+    pub const fn from_array(arr: &[[f64; 3]; 3]) -> Self {
+        Self::new(
+            arr[0][0], arr[0][1], arr[0][2],
+            arr[1][0], arr[1][1], arr[1][2],
+        )
     }
 
     /// Return the identity transform.
     #[inline]
     pub const fn identity() -> Self {
-        Self {
-            a: 1.0,
-            b: 0.0,
-            c: 0.0,
-            d: 0.0,
-            e: 1.0,
-            f: 0.0,
-            determinant: Some(1.0),
-        }
+        Self::new(1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
     }
 
     /// Create a translation transform from an offset vector.
     #[inline]
     pub const fn translation(xoff: f64, yoff: f64) -> Self {
-        Self {
-            a: 1.0,
-            b: 0.0,
-            c: xoff,
-            d: 0.0,
-            e: 1.0,
-            f: yoff,
-            determinant: Some(1.0),
-        }
+        Self::new(1.0, 0.0, xoff, 0.0, 1.0, yoff)
     }
 
     /// Create a scaling transform.
     ///
-    /// If only one scale factor is provided, it will be used for both dimensions.
+    /// If only one scale factor is provided, it is used for both dimensions.
     #[inline]
     pub fn scale(sx: f64, sy: Option<f64>) -> Self {
         let sy = sy.unwrap_or(sx);
-        Self {
-            a: sx,
-            b: 0.0,
-            c: 0.0,
-            d: 0.0,
-            e: sy,
-            f: 0.0,
-            determinant: Some(sx * sy),
-        }
+        Self::new(sx, 0.0, 0.0, 0.0, sy, 0.0)
     }
 
-    /// Create a shear transform along one or both axes.
+    /// Create a shear transform along one or both axes, in degrees.
     #[inline]
     pub fn shear(x_angle: f64, y_angle: f64) -> Self {
         let mx = x_angle.to_radians().tan();
         let my = y_angle.to_radians().tan();
-        Self {
-            a: 1.0,
-            b: mx,
-            c: 0.0,
-            d: my,
-            e: 1.0,
-            f: 0.0,
-            determinant: Some(1.0 - mx * my),
-        }
+        Self::new(1.0, mx, 0.0, my, 1.0, 0.0)
     }
 
-    /// Create a rotation transform at the specified angle.
-    ///
-    /// The angle is in degrees, counter-clockwise about the pivot point.
-    /// If no pivot point is provided, the coordinate system origin (0.0, 0.0) is used.
+    /// Create a rotation transform at the specified angle in degrees,
+    /// counter-clockwise about the pivot point. If no pivot is provided,
+    /// the origin (0, 0) is used.
     #[inline]
     pub fn rotation(angle: f64, pivot: Option<(f64, f64)>) -> Self {
         let (ca, sa) = cos_sin_deg(angle);
         match pivot {
-            None => Self {
-                a: ca,
-                b: -sa,
-                c: 0.0,
-                d: sa,
-                e: ca,
-                f: 0.0,
-                determinant: Some(ca * ca + sa * sa),
-            },
-            Some((px, py)) => Self {
-                a: ca,
-                b: -sa,
-                c: px - px * ca + py * sa,
-                d: sa,
-                e: ca,
-                f: py - px * sa - py * ca,
-                determinant: Some(ca * ca + sa * sa),
-            },
+            None => Self::new(ca, -sa, 0.0, sa, ca, 0.0),
+            Some((px, py)) => Self::new(
+                ca, -sa, px - px * ca + py * sa,
+                sa, ca, py - px * sa - py * ca,
+            ),
         }
     }
 
     /// Create the permutation transform.
-    ///
-    /// For 2x2 matrices, there is only one permutation matrix that is not the identity.
     #[inline]
     pub const fn permutation() -> Self {
-        Self {
-            a: 0.0,
-            b: 1.0,
-            c: 0.0,
-            d: 1.0,
-            e: 0.0,
-            f: 0.0,
-            determinant: Some(-1.0),
-        }
+        Self::new(0.0, 1.0, 0.0, 1.0, 0.0, 0.0)
     }
 
-    /// Return same coefficient order expected by GDAL's SetGeoTransform().
+    /// Return coefficients in the order expected by GDAL's SetGeoTransform().
     #[inline]
-    pub fn to_gdal(&self) -> (f64, f64, f64, f64, f64, f64) {
+    pub const fn to_gdal(&self) -> (f64, f64, f64, f64, f64, f64) {
         (self.c, self.a, self.b, self.f, self.d, self.e)
     }
 
     /// Return affine transformation parameters for shapely's affinity module.
     #[inline]
-    pub fn to_shapely(&self) -> (f64, f64, f64, f64, f64, f64) {
+    pub const fn to_shapely(&self) -> (f64, f64, f64, f64, f64, f64) {
         (self.a, self.b, self.d, self.e, self.c, self.f)
     }
 
-    /// Alias for 'c'.
+    /// X-axis translation. Alias for `c`.
     #[inline]
-    pub fn xoff(&self) -> f64 {
+    pub const fn xoff(&self) -> f64 {
         self.c
     }
 
-    /// Alias for 'f'.
+    /// Y-axis translation. Alias for `f`.
     #[inline]
-    pub fn yoff(&self) -> f64 {
+    pub const fn yoff(&self) -> f64 {
         self.f
     }
 
-    /// Evaluate the determinant of the transform matrix.
-    ///
-    /// This value is equal to the area scaling factor when the
-    /// transform is applied to a shape.
+    /// Evaluate the determinant of the transform matrix. This is the
+    /// area scaling factor when the transform is applied to a shape.
     #[inline]
     pub fn determinant(&self) -> f64 {
-        match self.determinant {
-            Some(det) => det,
-            None => self.a * self.e - self.b * self.d
-        }
+        self.a * self.e - self.b * self.d
     }
 
-    /// The absolute scaling factors of the transformation.
-    ///
-    /// This tuple represents the absolute value of the scaling factors of the
-    /// transformation, sorted from bigger to smaller.
-    #[inline]
-    fn scaling(&self) -> (f64, f64) {
-        let a = self.a;
-        let b = self.b;
-        let d = self.d;
-        let e = self.e;
-
-        // The singular values are the square root of the eigenvalues
-        // of the matrix times its transpose, M M*
-        // Computing trace and determinant of M M*
+    /// The absolute scaling factors of the transformation, sorted from
+    /// larger to smaller. These are the singular values of the 2x2
+    /// linear part of the transform.
+    pub fn scaling(&self) -> (f64, f64) {
+        let (a, b, d, e) = (self.a, self.b, self.d, self.e);
         let trace = a * a + b * b + d * d + e * e;
         let det2 = self.determinant().powi(2);
 
@@ -309,32 +245,26 @@ impl Affine {
         if delta < get_epsilon2() {
             delta = 0.0;
         }
-
         let sqrt_delta = delta.sqrt();
         let l1 = (trace / 2.0 + sqrt_delta).sqrt();
         let l2 = (trace / 2.0 - sqrt_delta).sqrt();
         (l1, l2)
     }
 
-    /// The eccentricity of the affine transformation.
-    ///
-    /// This value represents the eccentricity of an ellipse under
-    /// this affine transformation.
+    /// The eccentricity of an ellipse under this affine transformation.
     #[inline]
     pub fn eccentricity(&self) -> f64 {
         let (l1, l2) = self.scaling();
         ((l1 * l1 - l2 * l2) / (l1 * l1)).sqrt()
     }
 
-    /// The rotation angle in degrees of the affine transformation.
-    ///
-    /// This is the rotation angle in degrees of the affine transformation,
-    /// assuming it is in the form M = R S, where R is a rotation and S is a
-    /// scaling.
+    /// The rotation angle in degrees, assuming the transform is in the
+    /// form `M = R * S` (rotation composed with scaling).
     ///
     /// # Errors
     ///
-    /// Returns an error for improper and degenerate transformations.
+    /// Returns [`AffineError::UndefinedRotation`] for improper transforms
+    /// (negative determinant) that are not degenerate.
     pub fn rotation_angle(&self) -> Result<f64, AffineError> {
         if self.is_proper() || self.is_degenerate() {
             let (l1, _) = self.scaling();
@@ -352,260 +282,220 @@ impl Affine {
         self == &IDENTITY || self.almost_equals(&IDENTITY, None)
     }
 
-    /// True if the transform is rectilinear.
-    ///
-    /// i.e., whether a shape would remain axis-aligned, within rounding
-    /// limits, after applying the transform.
+    /// True if the transform is rectilinear: a shape stays axis-aligned
+    /// (within rounding limits) after applying it.
     #[inline]
     pub fn is_rectilinear(&self) -> bool {
         let epsilon = get_epsilon();
-        (self.a.abs() < epsilon && self.e.abs() < epsilon) ||
-        (self.d.abs() < epsilon && self.b.abs() < epsilon)
+        (self.a.abs() < epsilon && self.e.abs() < epsilon)
+            || (self.b.abs() < epsilon && self.d.abs() < epsilon)
     }
 
-    /// True if the transform is conformal.
-    ///
-    /// i.e., if angles between points are preserved after applying the
-    /// transform, within rounding limits. This implies that the
-    /// transform has no effective shear.
+    /// True if the transform is conformal: angles between points are
+    /// preserved (no effective shear), within rounding limits.
     #[inline]
     pub fn is_conformal(&self) -> bool {
         (self.a * self.b + self.d * self.e).abs() < get_epsilon()
     }
 
-    /// True if the transform is orthonormal.
-    ///
-    /// Which means that the transform represents a rigid motion, which
-    /// has no effective scaling or shear. Mathematically, this means
-    /// that the axis vectors of the transform matrix are perpendicular
-    /// and unit-length. Applying an orthonormal transform to a shape
-    /// always results in a congruent shape.
+    /// True if the transform is orthonormal: a rigid motion with no
+    /// effective scaling or shear.
     #[inline]
     pub fn is_orthonormal(&self) -> bool {
-        let a = self.a;
-        let b = self.b;
-        let d = self.d;
-        let e = self.e;
+        let (a, b, d, e) = (self.a, self.b, self.d, self.e);
         let epsilon = get_epsilon();
-        
-        self.is_conformal() &&
-        (1.0 - (a * a + d * d)).abs() < epsilon &&
-        (1.0 - (b * b + e * e)).abs() < epsilon
+        self.is_conformal()
+            && (1.0 - (a * a + d * d)).abs() < epsilon
+            && (1.0 - (b * b + e * e)).abs() < epsilon
     }
 
-    /// Return True if this transform is degenerate.
-    ///
-    /// A degenerate transform will collapse a shape to an effective area
-    /// of zero, and cannot be inverted.
+    /// True if this transform collapses shapes to zero area (det == 0).
     #[inline]
     pub fn is_degenerate(&self) -> bool {
         self.determinant() == 0.0
     }
 
-    /// Return True if this transform is proper.
-    ///
-    /// A proper transform (with a positive determinant) does not include
-    /// reflection.
+    /// True if the transform has a positive determinant (no reflection).
     #[inline]
     pub fn is_proper(&self) -> bool {
         self.determinant() > 0.0
     }
 
-    /// The values of the transform as three 2D column vectors.
-    ///
-    /// Returns (a, d), (b, e), (c, f).
+    /// The transform as three 2D column vectors `(a, d)`, `(b, e)`, `(c, f)`.
     #[inline]
-    pub fn column_vectors(&self) -> ((f64, f64), (f64, f64), (f64, f64)) {
+    pub const fn column_vectors(&self) -> ((f64, f64), (f64, f64), (f64, f64)) {
         ((self.a, self.d), (self.b, self.e), (self.c, self.f))
     }
 
-    /// Compare transforms for approximate equality.
+    /// Compare transforms for approximate equality within `precision`.
+    /// When `precision` is `None`, the global epsilon is used.
     #[inline]
     pub fn almost_equals(&self, other: &Self, precision: Option<f64>) -> bool {
         let precision = precision.unwrap_or_else(get_epsilon);
-        (self.a - other.a).abs() < precision &&
-        (self.b - other.b).abs() < precision &&
-        (self.c - other.c).abs() < precision &&
-        (self.d - other.d).abs() < precision &&
-        (self.e - other.e).abs() < precision &&
-        (self.f - other.f).abs() < precision
+        (self.a - other.a).abs() < precision
+            && (self.b - other.b).abs() < precision
+            && (self.c - other.c).abs() < precision
+            && (self.d - other.d).abs() < precision
+            && (self.e - other.e).abs() < precision
+            && (self.f - other.f).abs() < precision
     }
 
-    /// Transform a vector (x, y) using this transformation.
+    /// Transform a single 2D point/vector.
     #[inline]
     pub fn transform_vector(&self, vector: (f64, f64)) -> (f64, f64) {
         let (x, y) = vector;
         (
             x * self.a + y * self.b + self.c,
-            x * self.d + y * self.e + self.f
+            x * self.d + y * self.e + self.f,
         )
     }
 
-    /// Transform a sequence of points or vectors in-place.
-    pub fn itransform(&self, seq: &mut Vec<(f64, f64)>) {
+    /// Transform a sequence of points in-place. No-op for the identity.
+    pub fn itransform(&self, seq: &mut [(f64, f64)]) {
         if !self.is_identity() {
-            // Use chunks for better cache locality
-            const CHUNK_SIZE: usize = 64;
-            for chunk in seq.chunks_mut(CHUNK_SIZE) {
-                for point in chunk {
-                    *point = self.transform_vector(*point);
-                }
+            for point in seq.iter_mut() {
+                *point = self.transform_vector(*point);
             }
         }
     }
-    
+
     /// Convert to a 3x3 array.
     #[inline]
-    pub fn to_array(&self) -> [[f64; 3]; 3] {
+    pub const fn to_array(&self) -> [[f64; 3]; 3] {
         [
             [self.a, self.b, self.c],
             [self.d, self.e, self.f],
-            [0.0, 0.0, 1.0]
+            [0.0, 0.0, 1.0],
         ]
     }
-    
-    /// Convert to a tuple of all 9 elements.
+
+    /// Convert to a 9-tuple of all matrix elements in row-major order.
     #[inline]
-    pub fn to_tuple(&self) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64) {
+    pub const fn to_tuple(&self) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64) {
         (self.a, self.b, self.c, self.d, self.e, self.f, 0.0, 0.0, 1.0)
     }
 
-    // Inverse the transform
+    /// Iterate over the six coefficients `[a, b, c, d, e, f]`.
     #[inline]
-    pub fn inverse(&self) -> Result<Self, AffineError> {
-        Ok((!*self)?)
+    pub fn iter(&self) -> std::array::IntoIter<f64, 6> {
+        [self.a, self.b, self.c, self.d, self.e, self.f].into_iter()
     }
 
-    /// Convert to row and column indices
-    ///
-    /// Transforms world coordinates (x, y) to pixel coordinates (row, col).
-    /// Returns `(rows, cols)` where each element corresponds to the transformed coordinates.
+    /// Inverse transform. Equivalent to the `!` operator.
     ///
     /// # Errors
     ///
-    /// Returns `AffineError::LengthMismatch` if `xs` and `ys` have different lengths.
-    /// Returns `AffineError::TransformNotInvertible` if the transform cannot be inverted.
+    /// Returns [`AffineError::TransformNotInvertible`] when the transform
+    /// is degenerate.
     #[inline]
-    pub fn rowcol(&self, xs: &[f64], ys: &[f64], _zs: &[f64]) -> Result<(Vec<f64>, Vec<f64>), AffineError> {
-        // Early return for length mismatch
+    pub fn inverse(&self) -> Result<Self, AffineError> {
+        !*self
+    }
+
+    /// Transform world coordinates `(xs, ys)` to pixel `(rows, cols)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AffineError::LengthMismatch`] when `xs` and `ys` differ
+    /// in length, or [`AffineError::TransformNotInvertible`] when the
+    /// transform cannot be inverted.
+    pub fn rowcol(
+        &self,
+        xs: &[f64],
+        ys: &[f64],
+    ) -> Result<(Vec<f64>, Vec<f64>), AffineError> {
         if xs.len() != ys.len() {
-            return Err(AffineError::LengthMismatch { 
-                xs_len: xs.len(), 
-                ys_len: ys.len() 
+            return Err(AffineError::LengthMismatch {
+                xs_len: xs.len(),
+                ys_len: ys.len(),
             });
         }
-        
-        // Early return for empty input
         if xs.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
-        
+
         let inv = self.inverse()?;
-        
-        // Pre-allocate with known capacity for better performance
         let mut rows = Vec::with_capacity(xs.len());
         let mut cols = Vec::with_capacity(xs.len());
-        
-        // Use iterators for better performance and readability
         for (&x, &y) in xs.iter().zip(ys.iter()) {
             rows.push(inv.d * x + inv.e * y + inv.f);
             cols.push(inv.a * x + inv.b * y + inv.c);
         }
-        
         Ok((rows, cols))
     }
 
-    /// Mul
     #[inline]
-    pub fn _mul(&self, other: &Affine) -> Affine {
-        let sa = self.a;
-        let sb = self.b;
-        let sc = self.c;
-        let sd = self.d;
-        let se = self.e;
-        let sf = self.f;
-        
-        let oa = other.a;
-        let ob = other.b;
-        let oc = other.c;
-        let od = other.d;
-        let oe = other.e;
-        let of = other.f;
-        
-        Affine {
-            a: sa * oa + sb * od,
-            b: sa * ob + sb * oe,
-            c: sa * oc + sb * of + sc,
-            d: sd * oa + se * od,
-            e: sd * ob + se * oe,
-            f: sd * oc + se * of + sf,
-            determinant: None,
-        }
+    fn mul_affine(&self, other: &Affine) -> Affine {
+        Affine::new(
+            self.a * other.a + self.b * other.d,
+            self.a * other.b + self.b * other.e,
+            self.a * other.c + self.b * other.f + self.c,
+            self.d * other.a + self.e * other.d,
+            self.d * other.b + self.e * other.e,
+            self.d * other.c + self.e * other.f + self.f,
+        )
     }
 }
 
-/// Implement matrix multiplication for Affine transform.
+impl IntoIterator for Affine {
+    type Item = f64;
+    type IntoIter = std::array::IntoIter<f64, 6>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 impl Mul for Affine {
     type Output = Self;
-
     #[inline]
     fn mul(self, other: Self) -> Self {
-        self._mul(&other)
+        self.mul_affine(&other)
     }
 }
 
-/// Implement matrix multiplication for references
 impl Mul<Affine> for &Affine {
     type Output = Affine;
-
     #[inline]
     fn mul(self, other: Affine) -> Affine {
-        self._mul(&other)
+        self.mul_affine(&other)
     }
 }
 
 impl Mul<&Affine> for Affine {
     type Output = Affine;
-
     #[inline]
     fn mul(self, other: &Affine) -> Affine {
-        self._mul(other)
+        self.mul_affine(other)
     }
 }
 
 impl Mul<&Affine> for &Affine {
     type Output = Affine;
-
     #[inline]
     fn mul(self, other: &Affine) -> Affine {
-        self._mul(other)
+        self.mul_affine(other)
     }
 }
 
-/// Implement matrix multiplication for Affine transform and point.
 impl Mul<(f64, f64)> for Affine {
     type Output = (f64, f64);
-
     #[inline]
     fn mul(self, point: (f64, f64)) -> (f64, f64) {
         self.transform_vector(point)
     }
 }
 
-/// Implement matrix multiplication for reference to Affine and point.
 impl Mul<(f64, f64)> for &Affine {
     type Output = (f64, f64);
-
     #[inline]
     fn mul(self, point: (f64, f64)) -> (f64, f64) {
         self.transform_vector(point)
     }
 }
 
-/// Implement matrix multiplication for Affine transform and integer point.
 impl Mul<(isize, isize)> for Affine {
     type Output = (isize, isize);
-
     #[inline]
     fn mul(self, point: (isize, isize)) -> (isize, isize) {
         let (x, y) = self.transform_vector((point.0 as f64, point.1 as f64));
@@ -613,10 +503,8 @@ impl Mul<(isize, isize)> for Affine {
     }
 }
 
-/// Implement matrix multiplication for reference to Affine and integer point.
 impl Mul<(isize, isize)> for &Affine {
     type Output = (isize, isize);
-
     #[inline]
     fn mul(self, point: (isize, isize)) -> (isize, isize) {
         let (x, y) = self.transform_vector((point.0 as f64, point.1 as f64));
@@ -624,7 +512,6 @@ impl Mul<(isize, isize)> for &Affine {
     }
 }
 
-/// Implement inversion (~) operator for Affine transform.
 impl Not for Affine {
     type Output = Result<Self, AffineError>;
 
@@ -633,139 +520,127 @@ impl Not for Affine {
         if self.is_degenerate() {
             return Err(AffineError::TransformNotInvertible);
         }
-        
         let idet = 1.0 / self.determinant();
-        let sa = self.a;
-        let sb = self.b;
-        let sc = self.c;
-        let sd = self.d;
-        let se = self.e;
-        let sf = self.f;
-        
-        let ra = se * idet;
-        let rb = -sb * idet;
-        let rd = -sd * idet;
-        let re = sa * idet;
-        
-        Ok(Self {
-            a: ra,
-            b: rb,
-            c: -sc * ra - sf * rb,
-            d: rd,
-            e: re,
-            f: -sc * rd - sf * re,
-            determinant: Some(idet),
-        })
+        let ra = self.e * idet;
+        let rb = -self.b * idet;
+        let rd = -self.d * idet;
+        let re = self.a * idet;
+        Ok(Self::new(
+            ra, rb, -self.c * ra - self.f * rb,
+            rd, re, -self.c * rd - self.f * re,
+        ))
     }
 }
 
 impl Not for &Affine {
     type Output = Result<Affine, AffineError>;
-
     #[inline]
     fn not(self) -> Self::Output {
-        !(*self)
+        !*self
     }
 }
 
 impl PartialEq for Affine {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.a == other.a &&
-        self.b == other.b &&
-        self.c == other.c &&
-        self.d == other.d &&
-        self.e == other.e &&
-        self.f == other.f
+        self.a == other.a
+            && self.b == other.b
+            && self.c == other.c
+            && self.d == other.d
+            && self.e == other.e
+            && self.f == other.f
     }
 }
 
-impl Eq for Affine {}
+impl Default for Affine {
+    #[inline]
+    fn default() -> Self {
+        Self::identity()
+    }
+}
 
 impl Display for Affine {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "|{:6.2}, {:6.2}, {:6.2}|\n|{:6.2}, {:6.2}, {:6.2}|\n|{:6.2}, {:6.2}, {:6.2}|",
+        write!(
+            f,
+            "|{:6.2}, {:6.2}, {:6.2}|\n|{:6.2}, {:6.2}, {:6.2}|\n|{:6.2}, {:6.2}, {:6.2}|",
             self.a, self.b, self.c,
             self.d, self.e, self.f,
-            0.0, 0.0, 1.0)
+            0.0, 0.0, 1.0
+        )
     }
 }
 
-// Identity transform
-pub const IDENTITY: Affine = Affine {
-    a: 1.0,
-    b: 0.0,
-    c: 0.0,
-    d: 0.0,
-    e: 1.0,
-    f: 0.0,
-    determinant: Some(1.0),
-};
+/// The identity transform.
+pub const IDENTITY: Affine = Affine::new(1.0, 0.0, 0.0, 0.0, 1.0, 0.0);
 
-/// Return Affine from the contents of a world file string.
+/// Parse an Affine from the contents of an Esri/ArcGIS world file string.
 ///
-/// This method also translates the coefficients from center- to
-/// corner-based coordinates.
+/// World files store coefficients for *pixel-center* coordinates; the
+/// returned transform converts them to *pixel-corner* form, suitable for
+/// composition with point geometries indexed from (0, 0) at the upper-left.
 ///
 /// # Errors
 ///
-/// Returns `AffineError::ParseError` if the string contains invalid numbers.
-/// Returns `AffineError::InvalidWorldFile` if the string doesn't contain exactly 6 coefficients.
+/// Returns [`AffineError::ParseError`] for invalid numbers, or
+/// [`AffineError::InvalidWorldFile`] when the file does not contain exactly
+/// six coefficients.
 pub fn loadsw(s: &str) -> Result<Affine, AffineError> {
-    let coeffs: Vec<f64> = s.split_whitespace()
-        .map(|x| x.parse::<f64>().map_err(|e| AffineError::ParseError { source: e }))
+    let coeffs: Vec<f64> = s
+        .split_whitespace()
+        .enumerate()
+        .map(|(i, tok)| {
+            tok.parse::<f64>()
+                .map_err(|e| AffineError::ParseError { index: i, source: e })
+        })
         .collect::<Result<Vec<f64>, _>>()?;
-    
+
     if coeffs.len() != 6 {
         return Err(AffineError::InvalidWorldFile {
-            message: format!("Expected 6 coefficients, found {}", coeffs.len())
+            message: format!("Expected 6 coefficients, found {}", coeffs.len()),
         });
     }
-    
-    let a = coeffs[0];
-    let d = coeffs[1];
-    let b = coeffs[2];
-    let e = coeffs[3];
-    let c = coeffs[4];
-    let f = coeffs[5];
-    
+
+    let (a, d, b, e, c, f) = (coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5]);
     let center = Affine::new(a, b, c, d, e, f);
     Ok(center * Affine::translation(-0.5, -0.5))
 }
 
-/// Return string for a world file.
-///
-/// This method also translates the coefficients from corner- to
-/// center-based coordinates.
+/// Serialise an Affine to a world-file string, translating from
+/// pixel-corner to pixel-center coordinates.
 pub fn dumpsw(obj: &Affine) -> String {
     let center = obj * Affine::translation(0.5, 0.5);
-    format!("{}\n{}\n{}\n{}\n{}\n{}\n",
-        center.a, center.d, center.b, center.e, center.c, center.f)
+    format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        center.a, center.d, center.b, center.e, center.c, center.f
+    )
 }
 
-/// Set the global absolute error value and rounding limit.
+/// Set the global absolute error value and rounding limit used by
+/// approximate floating-point comparisons.
 ///
-/// # Parameters
-///
-/// * `epsilon` - The global absolute error value and rounding limit for
-///   approximate floating point comparison operations.
-///
-/// # Notes
-///
-/// The default value of `0.00001` is suitable for values that are in
-/// the "countable range". You may need a larger epsilon when using
-/// large absolute values, and a smaller value for very small values
-/// close to zero. Otherwise approximate comparison operations will not
-/// behave as expected.
+/// The default value of `1e-5` (see [`DEFAULT_EPSILON`]) suits values in
+/// the "countable range". Use a larger epsilon for large magnitudes and a
+/// smaller one for values near zero.
 pub fn set_epsilon(epsilon: f64) {
     let epsilon2 = epsilon * epsilon;
     EPSILON_BITS.store(epsilon.to_bits(), Ordering::Relaxed);
     EPSILON2_BITS.store(epsilon2.to_bits(), Ordering::Relaxed);
 }
 
+/// Reset the global epsilon to [`DEFAULT_EPSILON`].
+#[inline]
+pub fn reset_epsilon() {
+    set_epsilon(DEFAULT_EPSILON);
+}
+
 #[cfg(test)]
+#[allow(clippy::op_ref, clippy::excessive_precision)]
 mod tests {
     use super::*;
+    use approx::assert_relative_eq;
+
+    const TOL: f64 = 1e-10;
 
     #[test]
     fn test_identity() {
@@ -777,48 +652,148 @@ mod tests {
         assert_eq!(identity.e, 1.0);
         assert_eq!(identity.f, 0.0);
         assert!(identity.is_identity());
+        assert_eq!(identity, IDENTITY);
+        assert_eq!(Affine::default(), IDENTITY);
     }
 
     #[test]
     fn test_translation() {
         let t = Affine::translation(10.0, 20.0);
-        let p = (5.0, 5.0);
-        let result = t * p;
-        assert_eq!(result, (15.0, 25.0));
+        assert_eq!(t * (5.0, 5.0), (15.0, 25.0));
+        assert_eq!(t.xoff(), 10.0);
+        assert_eq!(t.yoff(), 20.0);
     }
 
     #[test]
     fn test_translation_isize() {
         let t = Affine::translation(10.0, 20.0);
-        let p = (5isize, 5isize);
-        let result = t * p;
-        assert_eq!(result, (15isize, 25isize));
+        assert_eq!(t * (5isize, 5isize), (15isize, 25isize));
     }
 
     #[test]
     fn test_scale() {
         let s = Affine::scale(2.0, Some(3.0));
-        let p = (5.0, 5.0);
-        let result = s * p;
-        assert_eq!(result, (10.0, 15.0));
+        assert_eq!(s * (5.0, 5.0), (10.0, 15.0));
+        let uniform = Affine::scale(4.0, None);
+        assert_eq!(uniform * (1.0, 1.0), (4.0, 4.0));
+        assert_eq!(uniform.determinant(), 16.0);
+    }
+
+    #[test]
+    fn test_shear() {
+        let sh = Affine::shear(45.0, 0.0);
+        let (x, y) = sh * (1.0, 1.0);
+        assert_relative_eq!(x, 2.0, max_relative = 1e-12);
+        assert_relative_eq!(y, 1.0, max_relative = 1e-12);
     }
 
     #[test]
     fn test_rotation() {
         let r = Affine::rotation(90.0, None);
-        let p = (1.0, 0.0);
-        let result = r * p;
-        assert!((result.0).abs() < 1e-10);
-        assert!((result.1 - 1.0).abs() < 1e-10);
+        let (x, y) = r * (1.0, 0.0);
+        assert!(x.abs() < TOL);
+        assert!((y - 1.0).abs() < TOL);
+    }
+
+    #[test]
+    fn test_rotation_with_pivot() {
+        let r = Affine::rotation(180.0, Some((1.0, 1.0)));
+        let (x, y) = r * (2.0, 2.0);
+        assert!((x - 0.0).abs() < TOL);
+        assert!((y - 0.0).abs() < TOL);
+    }
+
+    #[test]
+    fn test_rotation_angle() {
+        let r = Affine::rotation(30.0, None);
+        assert_relative_eq!(r.rotation_angle().unwrap(), 30.0, max_relative = 1e-12);
+
+        // Improper (reflection) transform should report undefined rotation
+        let reflect = Affine::scale(-1.0, Some(1.0));
+        assert!(matches!(
+            reflect.rotation_angle(),
+            Err(AffineError::UndefinedRotation)
+        ));
+    }
+
+    #[test]
+    fn test_permutation() {
+        let p = Affine::permutation();
+        assert_eq!(p * (3.0, 7.0), (7.0, 3.0));
+        assert_eq!(p.determinant(), -1.0);
+        assert!(!p.is_proper());
+        assert!(!p.is_degenerate());
+    }
+
+    #[test]
+    fn test_eccentricity() {
+        // Uniform scale → circle → eccentricity 0
+        let uniform = Affine::scale(3.0, None);
+        assert_relative_eq!(uniform.eccentricity(), 0.0, epsilon = 1e-12);
+
+        // 2x in x, 1x in y → eccentricity = sqrt(1 - 1/4) = sqrt(3)/2
+        let stretched = Affine::scale(2.0, Some(1.0));
+        assert_relative_eq!(
+            stretched.eccentricity(),
+            (3.0_f64).sqrt() / 2.0,
+            max_relative = 1e-12
+        );
+    }
+
+    #[test]
+    fn test_predicates() {
+        assert!(Affine::identity().is_rectilinear());
+        assert!(Affine::identity().is_orthonormal());
+        assert!(Affine::identity().is_conformal());
+        assert!(Affine::identity().is_proper());
+        assert!(!Affine::identity().is_degenerate());
+
+        let r = Affine::rotation(45.0, None);
+        assert!(r.is_orthonormal());
+        assert!(r.is_conformal());
+        assert!(!r.is_rectilinear());
+
+        let degenerate = Affine::scale(0.0, Some(0.0));
+        assert!(degenerate.is_degenerate());
+        assert!(!degenerate.is_proper());
+
+        let r90 = Affine::rotation(90.0, None);
+        assert!(r90.is_rectilinear());
+
+        let shear = Affine::shear(30.0, 0.0);
+        assert!(!shear.is_conformal());
+        assert!(!shear.is_orthonormal());
+    }
+
+    #[test]
+    fn test_column_vectors() {
+        let t = Affine::new(1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
+        let (c1, c2, c3) = t.column_vectors();
+        // column_vectors returns ((a,d), (b,e), (c,f))
+        assert_eq!(c1, (1.0, 4.0));
+        assert_eq!(c2, (2.0, 5.0));
+        assert_eq!(c3, (3.0, 6.0));
     }
 
     #[test]
     fn test_inversion() {
         let t = Affine::translation(10.0, 20.0);
         let t_inv = (!t).unwrap();
-        let p = (15.0, 25.0);
-        let result = t_inv * p;
-        assert_eq!(result, (5.0, 5.0));
+        assert_eq!(t_inv * (15.0, 25.0), (5.0, 5.0));
+
+        let s = Affine::scale(2.0, Some(3.0));
+        let s_inv = s.inverse().unwrap();
+        assert_relative_eq!(s_inv.determinant(), 1.0 / s.determinant(), max_relative = 1e-12);
+    }
+
+    #[test]
+    fn test_inversion_degenerate() {
+        let degenerate = Affine::scale(0.0, Some(1.0));
+        assert!(matches!(!degenerate, Err(AffineError::TransformNotInvertible)));
+        assert!(matches!(
+            degenerate.inverse(),
+            Err(AffineError::TransformNotInvertible)
+        ));
     }
 
     #[test]
@@ -826,28 +801,17 @@ mod tests {
         let t = Affine::translation(10.0, 20.0);
         let s = Affine::scale(2.0, Some(3.0));
         let c = t * s;
-        let p = (5.0, 5.0);
-        let result = c * p;
-        assert_eq!(result, (20.0, 35.0));
+        assert_eq!(c * (5.0, 5.0), (20.0, 35.0));
     }
-    
+
     #[test]
     fn test_reference_multiplication() {
         let t = Affine::translation(10.0, 20.0);
         let s = Affine::scale(2.0, Some(3.0));
         let c1 = &t * &s;
         let c2 = t * s;
-        let p = (5.0, 5.0);
-        assert_eq!(c1 * p, c2 * p);
-        assert_eq!(c1 * p, (20.0, 35.0));
-    }
-
-    #[test]
-    fn test_inversion_determinant() {
-        let s = Affine::scale(2.0, Some(3.0));
-        let inv = (!s).unwrap();
-        let expected = 1.0 / s.determinant();
-        assert!((inv.determinant() - expected).abs() < get_epsilon());
+        assert_eq!(c1 * (5.0, 5.0), c2 * (5.0, 5.0));
+        assert_eq!(c1 * (5.0, 5.0), (20.0, 35.0));
     }
 
     #[test]
@@ -858,52 +822,153 @@ mod tests {
     }
 
     #[test]
-    fn test_rowcol(){
+    fn test_to_shapely() {
+        let t = Affine::new(1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
+        assert_eq!(t.to_shapely(), (1.0, 2.0, 4.0, 5.0, 3.0, 6.0));
+    }
+
+    #[test]
+    fn test_to_array_roundtrip() {
+        let t = Affine::new(1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
+        let arr = t.to_array();
+        let back = Affine::from_array(&arr);
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn test_iter() {
+        let t = Affine::new(1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
+        let v: Vec<f64> = t.iter().collect();
+        assert_eq!(v, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let v2: Vec<f64> = t.into_iter().collect();
+        assert_eq!(v2, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_almost_equals() {
+        let a = Affine::identity();
+        let b = Affine::new(1.0 + 1e-9, 0.0, 0.0, 0.0, 1.0, 0.0);
+        assert!(a.almost_equals(&b, None));
+        assert!(!a.almost_equals(&b, Some(1e-12)));
+    }
+
+    #[test]
+    fn test_itransform() {
+        let t = Affine::translation(1.0, 2.0);
+        let mut pts = vec![(0.0, 0.0), (3.0, 4.0)];
+        t.itransform(&mut pts);
+        assert_eq!(pts, vec![(1.0, 2.0), (4.0, 6.0)]);
+
+        // identity should be a no-op
+        let mut pts2 = vec![(1.0, 1.0)];
+        Affine::identity().itransform(&mut pts2);
+        assert_eq!(pts2, vec![(1.0, 1.0)]);
+
+        // also accepts plain slices
+        let mut arr = [(1.0, 1.0), (2.0, 2.0)];
+        t.itransform(&mut arr[..]);
+        assert_eq!(arr, [(2.0, 3.0), (3.0, 4.0)]);
+    }
+
+    #[test]
+    fn test_loadsw_dumpsw_roundtrip() {
+        let original = Affine::new(2.0, 0.0, 100.0, 0.0, -2.0, 200.0);
+        let s = dumpsw(&original);
+        let parsed = loadsw(&s).unwrap();
+        assert!(original.almost_equals(&parsed, Some(1e-9)));
+    }
+
+    #[test]
+    fn test_loadsw_invalid() {
+        assert!(matches!(
+            loadsw("1 2 3"),
+            Err(AffineError::InvalidWorldFile { .. })
+        ));
+        assert!(matches!(
+            loadsw("1 2 3 4 5 nope"),
+            Err(AffineError::ParseError { .. })
+        ));
+    }
+
+    #[test]
+    fn test_rowcol() {
         let aff = Affine::new(
             300.0379266750948,
             0.0,
             101985.0,
             0.0,
-             -300.0417827298049929,
-            2826915.0
+            -300.0417827298049929,
+            2826915.0,
         );
-        let left = 101985.0000000000000000;
-        let bottom = 2611485.0000000000000000;
-        let right = 339315.0000000000000000;
-        let top = 2826915.0000000000000000;
-        
-        // Calculate image dimensions based on the coordinate system
-        // Width = (right - left) / pixel_width
-        // Height = (top - bottom) / abs(pixel_height)
+        let left = 101985.0;
+        let bottom = 2611485.0;
+        let right = 339315.0;
+        let top = 2826915.0;
+
         let pixel_width: f64 = 300.0379266750948;
         let pixel_height: f64 = -300.0417827298049929;
         let width = ((right - left) / pixel_width).round() as i32;
         let height = ((top - bottom) / pixel_height.abs()).round() as i32;
-        
-        // Test all four corners - rowcol now returns (rows, cols) format
-        // Top-left corner should map to (0, 0) - (row=0, col=0)
-        let (row_result, col_result) = aff.rowcol(&vec![left], &vec![top], &vec![1.0]).unwrap();
-        assert!((row_result[0] - 0.0).abs() < 1e-10, "Top-left row: expected 0, got {}", row_result[0]);
-        assert!((col_result[0] - 0.0).abs() < 1e-10, "Top-left col: expected 0, got {}", col_result[0]);
-        
-        // Top-right corner should map to (0, width) - (row=0, col=width)  
-        let (row_result, col_result) = aff.rowcol(&vec![right], &vec![top], &vec![1.0]).unwrap();
-        assert!((row_result[0] - 0.0).abs() < 1e-10, "Top-right row: expected 0, got {}", row_result[0]);
-        assert!((col_result[0] - width as f64).abs() < 1e-10, "Top-right col: expected {}, got {}", width, col_result[0]);
-        
-        // Bottom-right corner should map to (height, width) - (row=height, col=width)
-        let (row_result, col_result) = aff.rowcol(&vec![right], &vec![bottom], &vec![1.0]).unwrap();
-        assert!((row_result[0] - height as f64).abs() < 1e-10, "Bottom-right row: expected {}, got {}", height, row_result[0]);
-        assert!((col_result[0] - width as f64).abs() < 1e-10, "Bottom-right col: expected {}, got {}", width, col_result[0]);
-        
-        // Bottom-left corner should map to (height, 0) - (row=height, col=0)
-        let (row_result, col_result) = aff.rowcol(&vec![left], &vec![bottom], &vec![1.0]).unwrap();
-        assert!((row_result[0] - height as f64).abs() < 1e-10, "Bottom-left row: expected {}, got {}", height, row_result[0]);
-        assert!((col_result[0] - 0.0).abs() < 1e-10, "Bottom-left col: expected 0, got {}", col_result[0]);
-        
-        // Test the specific coordinate mentioned - should also map to (0, 0)
-        let result = aff.rowcol(&vec![101985.0], &vec![2826915.0], &vec![1.0]).unwrap();
+
+        let (row_result, col_result) = aff.rowcol(&[left], &[top]).unwrap();
+        assert!(row_result[0].abs() < TOL);
+        assert!(col_result[0].abs() < TOL);
+
+        let (row_result, col_result) = aff.rowcol(&[right], &[top]).unwrap();
+        assert!(row_result[0].abs() < TOL);
+        assert!((col_result[0] - width as f64).abs() < TOL);
+
+        let (row_result, col_result) = aff.rowcol(&[right], &[bottom]).unwrap();
+        assert!((row_result[0] - height as f64).abs() < TOL);
+        assert!((col_result[0] - width as f64).abs() < TOL);
+
+        let (row_result, col_result) = aff.rowcol(&[left], &[bottom]).unwrap();
+        assert!((row_result[0] - height as f64).abs() < TOL);
+        assert!(col_result[0].abs() < TOL);
+
+        let result = aff.rowcol(&[101985.0], &[2826915.0]).unwrap();
         assert_eq!(result, (vec![0.0], vec![0.0]));
     }
-}
 
+    #[test]
+    fn test_rowcol_length_mismatch() {
+        let aff = Affine::identity();
+        assert!(matches!(
+            aff.rowcol(&[1.0, 2.0], &[1.0]),
+            Err(AffineError::LengthMismatch { xs_len: 2, ys_len: 1 })
+        ));
+    }
+
+    #[test]
+    fn test_rowcol_empty() {
+        let aff = Affine::identity();
+        let (rows, cols) = aff.rowcol(&[], &[]).unwrap();
+        assert!(rows.is_empty() && cols.is_empty());
+    }
+
+    #[test]
+    fn test_rowcol_non_invertible() {
+        let aff = Affine::scale(0.0, Some(0.0));
+        assert!(matches!(
+            aff.rowcol(&[1.0], &[1.0]),
+            Err(AffineError::TransformNotInvertible)
+        ));
+    }
+
+    #[test]
+    fn test_epsilon_thread_safety() {
+        set_epsilon(1e-3);
+        assert!((get_epsilon() - 1e-3).abs() < 1e-15);
+        assert!((get_epsilon2() - 1e-6).abs() < 1e-15);
+        reset_epsilon();
+        assert!((get_epsilon() - DEFAULT_EPSILON).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_serde_roundtrip() {
+        let t = Affine::new(1.5, 2.5, 3.5, 4.5, 5.5, 6.5);
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Affine = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+    }
+}
