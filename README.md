@@ -8,7 +8,10 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-raffine = "0.2"
+raffine = "0.3"
+
+# Opt-in: zero-copy integration with the `ndarray` crate.
+raffine = { version = "0.3", features = ["ndarray"] }
 ```
 
 ## 🎯 Quick Start

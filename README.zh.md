@@ -8,7 +8,10 @@
 
 ```toml
 [dependencies]
-raffine = "0.2"
+raffine = "0.3"
+
+# 可选：与 `ndarray` 零拷贝集成。
+raffine = { version = "0.3", features = ["ndarray"] }
 ```
 
 ## 🎯 快速开始

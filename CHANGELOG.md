@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-05-15
+
+### Added
+- **Opt-in `ndarray` feature** with zero-copy methods:
+  - `transform_xy` / `transform_xy_into` — SoA (`ArrayView1<f64>` xs/ys).
+  - `transform_pairs` / `itransform_pairs` — AoS `[N, 2]` `Array2<f64>`.
+  - `rowcol_xy` / `rowcol_xy_into` — inverse SoA.
+  All methods detect contiguous (standard-layout) inputs and dispatch to
+  a slice fast path that the compiler vectorises with FMA; strided views
+  fall back to ndarray iteration.
+- `AffineError::InvalidShape` variant for shape errors (emitted by the
+  new ndarray methods).
+
+### Changed
+- `AffineError` is now `#[non_exhaustive]` so future variants can be
+  added without a breaking change.
+- MSRV bumped to 1.83 (required for `const fn f64::to_bits`).
+
 ## [0.2.0] - 2026-05-14
 
 First public release on crates.io. The library was rewritten and aligned

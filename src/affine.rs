@@ -63,6 +63,7 @@ pub fn get_epsilon2() -> f64 {
 
 /// Error type for affine transformation operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum AffineError {
     /// The transform could not be inverted.
     #[error("The transform could not be inverted")]
@@ -81,6 +82,12 @@ pub enum AffineError {
     ParseError {
         index: usize,
         source: std::num::ParseFloatError,
+    },
+    /// Invalid ndarray shape (only emitted with the `ndarray` feature).
+    #[error("invalid array shape: expected {expected}, got {actual:?}")]
+    InvalidShape {
+        expected: &'static str,
+        actual: Vec<usize>,
     },
 }
 
