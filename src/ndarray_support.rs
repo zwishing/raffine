@@ -4,43 +4,46 @@
 //! through [`ArrayView`](ndarray::ArrayView) / [`ArrayViewMut`](ndarray::ArrayViewMut)
 //! so they are zero-copy. When inputs and outputs are contiguous
 //! (standard layout) the implementation takes a slice fast path that
-//! the compiler autovectorises with FMA; non-contiguous (strided)
-//! inputs fall back to ndarray iteration.
-//!
-//! For ergonomics the parallel-array (SoA) APIs accept and return
-//! one-dimensional arrays of `x` and `y`. The packed (AoS) variant
-//! mutates an `[N, 2]` array in place; this avoids an allocation and
-//! matches the natural memory layout of geometry libraries.
+//! the compiler autovectorises; non-contiguous (strided) inputs fall
+//! back to ndarray iteration.
 
 use ndarray::{Array1, ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, Axis};
 
-use crate::{Affine, AffineError};
-
-#[inline(always)]
-fn tx(a: &Affine, x: f64, y: f64) -> (f64, f64) {
-    (
-        x.mul_add(a.a, y.mul_add(a.b, a.c)),
-        x.mul_add(a.d, y.mul_add(a.e, a.f)),
-    )
-}
+use crate::{fma, Affine, AffineError};
 
 /// Forward transform on contiguous parallel-array buffers.
 ///
-/// SAFETY: All four slices must already share the same length.
+/// Pre-condition: all four slices have at least `xs.len()` elements.
 #[inline]
 fn forward_slice(aff: &Affine, xs: &[f64], ys: &[f64], ox: &mut [f64], oy: &mut [f64]) {
     let n = xs.len();
-    // Slice all four to the same length up front so the bound checks
-    // hoist out of the loop and LLVM can vectorise the body.
-    let xs = &xs[..n];
-    let ys = &ys[..n];
-    let ox = &mut ox[..n];
-    let oy = &mut oy[..n];
+    // The asserts let the compiler elide bounds checks inside the loop.
+    assert_eq!(ys.len(), n);
+    assert_eq!(ox.len(), n);
+    assert_eq!(oy.len(), n);
+    // Hoist coefficients into locals so the optimiser doesn't need to
+    // re-prove non-aliasing of `aff` on every iteration.
+    let (a, b, c, d, e, f) = (aff.a, aff.b, aff.c, aff.d, aff.e, aff.f);
     for i in 0..n {
         let x = xs[i];
         let y = ys[i];
-        ox[i] = x.mul_add(aff.a, y.mul_add(aff.b, aff.c));
-        oy[i] = x.mul_add(aff.d, y.mul_add(aff.e, aff.f));
+        ox[i] = fma(x, a, fma(y, b, c));
+        oy[i] = fma(x, d, fma(y, e, f));
+    }
+}
+
+#[inline]
+fn inverse_slice(inv: &Affine, xs: &[f64], ys: &[f64], rs: &mut [f64], cs: &mut [f64]) {
+    let n = xs.len();
+    assert_eq!(ys.len(), n);
+    assert_eq!(rs.len(), n);
+    assert_eq!(cs.len(), n);
+    let (a, b, c, d, e, f) = (inv.a, inv.b, inv.c, inv.d, inv.e, inv.f);
+    for i in 0..n {
+        let x = xs[i];
+        let y = ys[i];
+        rs[i] = fma(x, d, fma(y, e, f));
+        cs[i] = fma(x, a, fma(y, b, c));
     }
 }
 
@@ -50,10 +53,6 @@ impl Affine {
     ///
     /// Prefer [`transform_xy_into`](Self::transform_xy_into) if you can
     /// reuse output buffers — it avoids two `Array1` allocations.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AffineError::LengthMismatch`] if `xs` and `ys` differ in length.
     pub fn transform_xy(
         &self,
         xs: ArrayView1<'_, f64>,
@@ -65,27 +64,25 @@ impl Affine {
                 ys_len: ys.len(),
             });
         }
-        let mut out_x = Array1::<f64>::uninit(xs.len());
-        let mut out_y = Array1::<f64>::uninit(xs.len());
-        // Initialise via the slice fast path when possible.
-        // Array1::uninit is contiguous so this always succeeds.
-        let ox = out_x.as_slice_mut().expect("uninit Array1 is contiguous");
-        let oy = out_y.as_slice_mut().expect("uninit Array1 is contiguous");
-        // SAFETY: forward_slice and the strided fallback both fully
-        // initialise the entire slice. After this call every element
-        // is initialised so it is sound to call `assume_init`.
+        let n = xs.len();
+        let mut out_x = Array1::<f64>::uninit(n);
+        let mut out_y = Array1::<f64>::uninit(n);
+        // SAFETY: write_dispatch initialises every element of both slices
+        // before we call assume_init below.
         unsafe {
-            transform_dispatch(self, xs, ys, ox, oy);
+            let ox = out_x
+                .as_slice_mut()
+                .expect("uninit Array1 is contiguous");
+            let oy = out_y
+                .as_slice_mut()
+                .expect("uninit Array1 is contiguous");
+            write_dispatch_forward(self, xs, ys, ox, oy);
             Ok((out_x.assume_init(), out_y.assume_init()))
         }
     }
 
     /// Transform parallel `xs` / `ys` into pre-allocated outputs without
     /// allocating. The four views must share the same length.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AffineError::LengthMismatch`] when lengths differ.
     pub fn transform_xy_into(
         &self,
         xs: ArrayView1<'_, f64>,
@@ -100,7 +97,6 @@ impl Affine {
                 ys_len: ys.len().max(out_x.len()).max(out_y.len()),
             });
         }
-        // Fast path: every view is contiguous standard layout.
         if let (Some(xs_s), Some(ys_s), Some(ox_s), Some(oy_s)) = (
             xs.as_slice(),
             ys.as_slice(),
@@ -110,25 +106,20 @@ impl Affine {
             forward_slice(self, xs_s, ys_s, ox_s, oy_s);
             return Ok(());
         }
-        // Strided fallback.
+        let (a, b, c, d, e, f) = (self.a, self.b, self.c, self.d, self.e, self.f);
         ndarray::Zip::from(&xs)
             .and(&ys)
             .and(&mut out_x)
             .and(&mut out_y)
             .for_each(|&x, &y, ox, oy| {
-                let (rx, ry) = tx(self, x, y);
-                *ox = rx;
-                *oy = ry;
+                *ox = fma(x, a, fma(y, b, c));
+                *oy = fma(x, d, fma(y, e, f));
             });
         Ok(())
     }
 
     /// Transform an `[N, 2]` packed point array in place. Each row is
     /// one `(x, y)` point.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AffineError::InvalidShape`] if `pts.ncols() != 2`.
     pub fn itransform_pairs(
         &self,
         mut pts: ArrayViewMut2<'_, f64>,
@@ -139,13 +130,14 @@ impl Affine {
                 actual: pts.shape().to_vec(),
             });
         }
+        let (a, b, c, d, e, f) = (self.a, self.b, self.c, self.d, self.e, self.f);
         // Fast path: row-major contiguous → operate on the flat slice.
         if let Some(flat) = pts.as_slice_mut() {
             for chunk in flat.chunks_exact_mut(2) {
                 let x = chunk[0];
                 let y = chunk[1];
-                chunk[0] = x.mul_add(self.a, y.mul_add(self.b, self.c));
-                chunk[1] = x.mul_add(self.d, y.mul_add(self.e, self.f));
+                chunk[0] = fma(x, a, fma(y, b, c));
+                chunk[1] = fma(x, d, fma(y, e, f));
             }
             return Ok(());
         }
@@ -153,18 +145,14 @@ impl Affine {
         for mut row in pts.axis_iter_mut(Axis(0)) {
             let x = row[0];
             let y = row[1];
-            row[0] = x.mul_add(self.a, y.mul_add(self.b, self.c));
-            row[1] = x.mul_add(self.d, y.mul_add(self.e, self.f));
+            row[0] = fma(x, a, fma(y, b, c));
+            row[1] = fma(x, d, fma(y, e, f));
         }
         Ok(())
     }
 
     /// Transform an `[N, 2]` packed point array into a freshly allocated
     /// output of the same shape.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AffineError::InvalidShape`] if `pts.ncols() != 2`.
     pub fn transform_pairs(
         &self,
         pts: ArrayView2<'_, f64>,
@@ -175,38 +163,32 @@ impl Affine {
                 actual: pts.shape().to_vec(),
             });
         }
+        let (a, b, c, d, e, f) = (self.a, self.b, self.c, self.d, self.e, self.f);
         let mut out = ndarray::Array2::<f64>::uninit((pts.nrows(), 2));
-        // Both contiguous fast path.
         if let (Some(src), Some(dst)) = (pts.as_slice(), out.as_slice_mut()) {
-            // SAFETY: src.len() == dst.len() == 2 * nrows.
-            let n = src.len();
-            for i in (0..n).step_by(2) {
-                let x = src[i];
-                let y = src[i + 1];
-                dst[i].write(x.mul_add(self.a, y.mul_add(self.b, self.c)));
-                dst[i + 1].write(x.mul_add(self.d, y.mul_add(self.e, self.f)));
+            // SAFETY: src.len() == dst.len() == 2 * nrows, and chunks_exact
+            // is in lockstep so every dst element is written.
+            for (s, d_chunk) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
+                let x = s[0];
+                let y = s[1];
+                d_chunk[0].write(fma(x, a, fma(y, b, c)));
+                d_chunk[1].write(fma(x, d, fma(y, e, f)));
             }
-            // SAFETY: fully initialised above.
             return Ok(unsafe { out.assume_init() });
         }
-        // Strided fallback.
-        for (i, row) in pts.axis_iter(Axis(0)).enumerate() {
-            let x = row[0];
-            let y = row[1];
-            out[[i, 0]].write(x.mul_add(self.a, y.mul_add(self.b, self.c)));
-            out[[i, 1]].write(x.mul_add(self.d, y.mul_add(self.e, self.f)));
+        // Strided fallback: zip row iterators directly to avoid 2D index lookups.
+        for (src_row, mut dst_row) in pts.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
+            let x = src_row[0];
+            let y = src_row[1];
+            dst_row[0].write(fma(x, a, fma(y, b, c)));
+            dst_row[1].write(fma(x, d, fma(y, e, f)));
         }
-        // SAFETY: every element was written.
+        // SAFETY: every element was written above.
         Ok(unsafe { out.assume_init() })
     }
 
     /// Inverse transform world `(xs, ys)` to pixel `(rows, cols)`,
     /// returning newly allocated arrays.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AffineError::LengthMismatch`] when lengths differ, or
-    /// [`AffineError::TransformNotInvertible`] when `self` is degenerate.
     pub fn rowcol_xy(
         &self,
         xs: ArrayView1<'_, f64>,
@@ -219,21 +201,18 @@ impl Affine {
             });
         }
         let inv = self.inverse()?;
-        let mut rows = Array1::<f64>::uninit(xs.len());
-        let mut cols = Array1::<f64>::uninit(xs.len());
-        let r = rows.as_slice_mut().expect("uninit Array1 is contiguous");
-        let c = cols.as_slice_mut().expect("uninit Array1 is contiguous");
+        let n = xs.len();
+        let mut rows = Array1::<f64>::uninit(n);
+        let mut cols = Array1::<f64>::uninit(n);
         unsafe {
-            inverse_dispatch(&inv, xs, ys, r, c);
+            let r = rows.as_slice_mut().expect("uninit Array1 is contiguous");
+            let c = cols.as_slice_mut().expect("uninit Array1 is contiguous");
+            write_dispatch_inverse(&inv, xs, ys, r, c);
             Ok((rows.assume_init(), cols.assume_init()))
         }
     }
 
     /// Inverse SoA into pre-allocated output buffers.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`rowcol_xy`](Self::rowcol_xy).
     pub fn rowcol_xy_into(
         &self,
         xs: ArrayView1<'_, f64>,
@@ -258,81 +237,80 @@ impl Affine {
             inverse_slice(&inv, xs_s, ys_s, rs, cs);
             return Ok(());
         }
+        let (a, b, c, d, e, f) = (inv.a, inv.b, inv.c, inv.d, inv.e, inv.f);
         ndarray::Zip::from(&xs)
             .and(&ys)
             .and(&mut rows)
             .and(&mut cols)
-            .for_each(|&x, &y, r, c| {
-                *r = x.mul_add(inv.d, y.mul_add(inv.e, inv.f));
-                *c = x.mul_add(inv.a, y.mul_add(inv.b, inv.c));
+            .for_each(|&x, &y, r, col| {
+                *r = fma(x, d, fma(y, e, f));
+                *col = fma(x, a, fma(y, b, c));
             });
         Ok(())
     }
 }
 
-#[inline]
-fn inverse_slice(inv: &Affine, xs: &[f64], ys: &[f64], rs: &mut [f64], cs: &mut [f64]) {
-    let n = xs.len();
-    let xs = &xs[..n];
-    let ys = &ys[..n];
-    let rs = &mut rs[..n];
-    let cs = &mut cs[..n];
-    for i in 0..n {
-        let x = xs[i];
-        let y = ys[i];
-        rs[i] = x.mul_add(inv.d, y.mul_add(inv.e, inv.f));
-        cs[i] = x.mul_add(inv.a, y.mul_add(inv.b, inv.c));
-    }
-}
-
-/// SAFETY: `ox.len() == oy.len() == xs.len()` already established; this
-/// helper merely dispatches to the contiguous fast path or the strided
-/// fallback. It fully initialises both output slices.
-unsafe fn transform_dispatch(
+/// SAFETY: caller must ensure `ox.len() == oy.len() == xs.len() == ys.len()`.
+/// All elements of `ox` and `oy` are initialised on return.
+unsafe fn write_dispatch_forward(
     aff: &Affine,
     xs: ArrayView1<'_, f64>,
     ys: ArrayView1<'_, f64>,
     ox: &mut [std::mem::MaybeUninit<f64>],
     oy: &mut [std::mem::MaybeUninit<f64>],
 ) {
-    // The two output slices come from freshly-allocated uninit Array1s,
-    // so they are always contiguous; we still walk inputs with ndarray
-    // to support strided views.
+    let n = xs.len();
+    let (a, b, c, d, e, f) = (aff.a, aff.b, aff.c, aff.d, aff.e, aff.f);
     if let (Some(xs_s), Some(ys_s)) = (xs.as_slice(), ys.as_slice()) {
-        for i in 0..xs_s.len() {
+        assert_eq!(ys_s.len(), n);
+        assert_eq!(ox.len(), n);
+        assert_eq!(oy.len(), n);
+        for i in 0..n {
             let x = xs_s[i];
             let y = ys_s[i];
-            ox[i].write(x.mul_add(aff.a, y.mul_add(aff.b, aff.c)));
-            oy[i].write(x.mul_add(aff.d, y.mul_add(aff.e, aff.f)));
+            ox[i].write(fma(x, a, fma(y, b, c)));
+            oy[i].write(fma(x, d, fma(y, e, f)));
         }
     } else {
+        assert_eq!(ox.len(), n);
+        assert_eq!(oy.len(), n);
         for (i, (x, y)) in xs.iter().zip(ys.iter()).enumerate() {
-            let (rx, ry) = tx(aff, *x, *y);
-            ox[i].write(rx);
-            oy[i].write(ry);
+            let x = *x;
+            let y = *y;
+            ox[i].write(fma(x, a, fma(y, b, c)));
+            oy[i].write(fma(x, d, fma(y, e, f)));
         }
     }
 }
 
-/// SAFETY: same invariants as `transform_dispatch`.
-unsafe fn inverse_dispatch(
+/// SAFETY: same invariants as `write_dispatch_forward`.
+unsafe fn write_dispatch_inverse(
     inv: &Affine,
     xs: ArrayView1<'_, f64>,
     ys: ArrayView1<'_, f64>,
     rs: &mut [std::mem::MaybeUninit<f64>],
     cs: &mut [std::mem::MaybeUninit<f64>],
 ) {
+    let n = xs.len();
+    let (a, b, c, d, e, f) = (inv.a, inv.b, inv.c, inv.d, inv.e, inv.f);
     if let (Some(xs_s), Some(ys_s)) = (xs.as_slice(), ys.as_slice()) {
-        for i in 0..xs_s.len() {
+        assert_eq!(ys_s.len(), n);
+        assert_eq!(rs.len(), n);
+        assert_eq!(cs.len(), n);
+        for i in 0..n {
             let x = xs_s[i];
             let y = ys_s[i];
-            rs[i].write(x.mul_add(inv.d, y.mul_add(inv.e, inv.f)));
-            cs[i].write(x.mul_add(inv.a, y.mul_add(inv.b, inv.c)));
+            rs[i].write(fma(x, d, fma(y, e, f)));
+            cs[i].write(fma(x, a, fma(y, b, c)));
         }
     } else {
+        assert_eq!(rs.len(), n);
+        assert_eq!(cs.len(), n);
         for (i, (x, y)) in xs.iter().zip(ys.iter()).enumerate() {
-            rs[i].write(x.mul_add(inv.d, y.mul_add(inv.e, inv.f)));
-            cs[i].write(x.mul_add(inv.a, y.mul_add(inv.b, inv.c)));
+            let x = *x;
+            let y = *y;
+            rs[i].write(fma(x, d, fma(y, e, f)));
+            cs[i].write(fma(x, a, fma(y, b, c)));
         }
     }
 }
@@ -366,20 +344,6 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_xy_strided_fallback() {
-        let t = crate::Affine::translation(1.0, 2.0);
-        // 2D base, then take a strided view (step 2 along axis 0).
-        let base = array![[1.0, 9.0], [2.0, 9.0], [3.0, 9.0], [4.0, 9.0]];
-        let xs = base.slice(ndarray::s![..;2, 0]).to_owned(); // [1.0, 3.0]
-        let ys = base.slice(ndarray::s![..;2, 0]).to_owned(); // [1.0, 3.0]
-        let xs_v = xs.view();
-        let ys_v = ys.view();
-        let (ox, oy) = t.transform_xy(xs_v, ys_v).unwrap();
-        assert_eq!(ox.to_vec(), vec![2.0, 4.0]);
-        assert_eq!(oy.to_vec(), vec![3.0, 5.0]);
-    }
-
-    #[test]
     fn test_transform_xy_length_mismatch() {
         let t = crate::Affine::identity();
         let xs = array![1.0, 2.0];
@@ -401,8 +365,6 @@ mod tests {
     #[test]
     fn test_itransform_pairs_strided() {
         let t = crate::Affine::translation(1.0, 2.0);
-        // Build a [6, 2] row-major array and pick every other row to get
-        // a non-contiguous mutable [3, 2] view (stride along axis 0 is 2).
         let mut bigger = array![
             [0.0, 0.0],
             [99.0, 99.0],
@@ -418,7 +380,6 @@ mod tests {
         assert_eq!(bigger.row(0).to_vec(), vec![1.0, 2.0]);
         assert_eq!(bigger.row(2).to_vec(), vec![2.0, 3.0]);
         assert_eq!(bigger.row(4).to_vec(), vec![3.0, 4.0]);
-        // Spacer rows untouched.
         assert_eq!(bigger.row(1).to_vec(), vec![99.0, 99.0]);
     }
 

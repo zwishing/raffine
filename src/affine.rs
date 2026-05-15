@@ -91,6 +91,37 @@ pub enum AffineError {
     },
 }
 
+/// `x * a + b`.
+///
+/// On targets with hardware FMA (`target_feature = "fma"` on x86_64 or
+/// `"vfp4"` / `"neon"` on ARM/AArch64) this lowers to a single fused
+/// instruction with single rounding (most accurate). On targets without
+/// hardware FMA we fall back to plain `mul + add` because `f64::mul_add`
+/// becomes a libm function call on those targets, which is 20–50× slower
+/// than two separate FP ops.
+///
+/// Build with `RUSTFLAGS="-C target-cpu=native"` (or any flag enabling
+/// FMA) to opt into the more accurate hardware path.
+#[inline(always)]
+pub(crate) fn fma(x: f64, a: f64, b: f64) -> f64 {
+    #[cfg(any(
+        target_feature = "fma",
+        target_feature = "vfp4",
+        target_feature = "neon",
+    ))]
+    {
+        x.mul_add(a, b)
+    }
+    #[cfg(not(any(
+        target_feature = "fma",
+        target_feature = "vfp4",
+        target_feature = "neon",
+    )))]
+    {
+        x * a + b
+    }
+}
+
 /// Return the cosine and sine for the given angle in degrees, with
 /// exact handling of multiples of 90.
 #[inline]
@@ -349,14 +380,15 @@ impl Affine {
 
     /// Transform a single 2D point/vector.
     ///
-    /// Uses [`f64::mul_add`] for fused multiply-add when available
-    /// (FMA3 on x86_64, the FMUL/FMADD fused path on AArch64).
+    /// Uses fused multiply-add when the target supports it (FMA3 on
+    /// x86_64, NEON/VFP4 on ARM); falls back to plain `mul + add`
+    /// elsewhere — see [`fma`].
     #[inline]
     pub fn transform_vector(&self, vector: (f64, f64)) -> (f64, f64) {
         let (x, y) = vector;
         (
-            x.mul_add(self.a, y.mul_add(self.b, self.c)),
-            x.mul_add(self.d, y.mul_add(self.e, self.f)),
+            fma(x, self.a, fma(y, self.b, self.c)),
+            fma(x, self.d, fma(y, self.e, self.f)),
         )
     }
 
@@ -471,8 +503,8 @@ impl Affine {
         rows.reserve(xs.len());
         cols.reserve(xs.len());
         for (&x, &y) in xs.iter().zip(ys.iter()) {
-            rows.push(x.mul_add(inv.d, y.mul_add(inv.e, inv.f)));
-            cols.push(x.mul_add(inv.a, y.mul_add(inv.b, inv.c)));
+            rows.push(fma(x, inv.d, fma(y, inv.e, inv.f)));
+            cols.push(fma(x, inv.a, fma(y, inv.b, inv.c)));
         }
         Ok(())
     }
@@ -480,12 +512,12 @@ impl Affine {
     #[inline]
     fn mul_affine(&self, other: &Affine) -> Affine {
         Affine::new(
-            self.a.mul_add(other.a, self.b * other.d),
-            self.a.mul_add(other.b, self.b * other.e),
-            self.a.mul_add(other.c, self.b.mul_add(other.f, self.c)),
-            self.d.mul_add(other.a, self.e * other.d),
-            self.d.mul_add(other.b, self.e * other.e),
-            self.d.mul_add(other.c, self.e.mul_add(other.f, self.f)),
+            fma(self.a, other.a, self.b * other.d),
+            fma(self.a, other.b, self.b * other.e),
+            fma(self.a, other.c, fma(self.b, other.f, self.c)),
+            fma(self.d, other.a, self.e * other.d),
+            fma(self.d, other.b, self.e * other.e),
+            fma(self.d, other.c, fma(self.e, other.f, self.f)),
         )
     }
 }
@@ -579,8 +611,8 @@ impl Not for Affine {
         let rd = -self.d * idet;
         let re = self.a * idet;
         Ok(Self::new(
-            ra, rb, (-self.c).mul_add(ra, -self.f * rb),
-            rd, re, (-self.c).mul_add(rd, -self.f * re),
+            ra, rb, fma(-self.c, ra, -self.f * rb),
+            rd, re, fma(-self.c, rd, -self.f * re),
         ))
     }
 }
